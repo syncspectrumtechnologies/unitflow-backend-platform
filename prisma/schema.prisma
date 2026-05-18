@@ -1,0 +1,421 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("PLATFORM_DATABASE_URL")
+}
+
+enum AccountStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum VerificationChannel {
+  EMAIL
+  PHONE
+}
+
+enum VerificationPurpose {
+  SIGNUP
+  LOGIN
+  RESET
+}
+
+enum TenantLifecycleStatus {
+  TRIAL_PENDING
+  TRIAL_ACTIVE
+  ACTIVE
+  GRACE
+  SUSPENDED
+  CANCELLED
+  EXPIRED
+}
+
+enum OnboardingStatus {
+  DRAFT
+  PROFILE_COMPLETED
+  PROVISIONING
+  READY
+}
+
+enum BillingCycle {
+  TRIAL
+  MONTHLY
+  YEARLY
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  GRACE
+  EXPIRED
+  CANCELLED
+}
+
+enum PlanType {
+  SINGLE_USER
+  MULTI_USER
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+enum SessionScope {
+  CONTROL_PLANE
+  RUNTIME
+}
+
+enum OpsRole {
+  ADMIN
+  SUPPORT
+  FINANCE
+}
+
+enum ReleaseChannel {
+  STABLE
+  BETA
+  INTERNAL
+}
+
+enum ReleasePlatform {
+  WINDOWS
+  MAC
+}
+
+enum NotificationSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+model Account {
+  id                String              @id @default(cuid())
+  email             String              @unique
+  phone             String?             @unique
+  name              String
+  password_hash     String
+  status            AccountStatus       @default(ACTIVE)
+  is_super_admin    Boolean             @default(false)
+  runtime_access_exempt Boolean         @default(false)
+  email_verified_at DateTime?
+  phone_verified_at DateTime?
+  last_login_at     DateTime?
+  created_at        DateTime            @default(now())
+  updated_at        DateTime            @updatedAt
+
+  sessions          PlatformSession[]
+  verifications     AccountVerification[]
+  owned_tenants     Tenant[]            @relation("TenantOwner")
+  devices           Device[]
+  runtime_sessions  RuntimeSession[]
+  notifications     PlatformNotification[]
+
+  @@index([status])
+}
+
+model PlatformSession {
+  id           String    @id @default(cuid())
+  account_id   String
+  jti          String    @unique
+  ip           String?
+  user_agent   String?
+  last_seen_at DateTime  @default(now())
+  expires_at   DateTime
+  revoked_at   DateTime?
+  created_at   DateTime  @default(now())
+
+  account Account @relation(fields: [account_id], references: [id])
+
+  @@index([account_id, revoked_at, expires_at])
+}
+
+model Tenant {
+  id                         String                @id @default(cuid())
+  owner_account_id           String
+  slug                       String                @unique
+  display_name               String
+  legal_name                 String?
+  business_type              String?
+  onboarding_status          OnboardingStatus      @default(DRAFT)
+  lifecycle_status           TenantLifecycleStatus @default(TRIAL_PENDING)
+  runtime_company_id         String?               @unique
+  runtime_owner_user_id      String?
+  runtime_provision_status   String?
+  runtime_last_synced_at     DateTime?
+  trial_started_at           DateTime?
+  trial_ends_at              DateTime?
+  created_at                 DateTime              @default(now())
+  updated_at                 DateTime              @updatedAt
+
+  owner         Account                @relation("TenantOwner", fields: [owner_account_id], references: [id])
+  config        TenantConfig?
+  locations     TenantLocation[]
+  sales_companies TenantSalesCompany[]
+  subscriptions TenantSubscription[]
+  payments      Payment[]
+  devices       Device[]
+  runtime_sessions RuntimeSession[]
+  notifications PlatformNotification[]
+  audits        OpsAuditLog[]
+
+  @@index([owner_account_id])
+  @@index([lifecycle_status])
+}
+
+model TenantConfig {
+  id             String   @id @default(cuid())
+  tenant_id       String   @unique
+  theme_color     String?
+  logo_url        String?
+  app_title       String?
+  invoice_header  String?
+  invoice_footer  String?
+  locale          String?  @default("en-IN")
+  timezone        String?  @default("Asia/Kolkata")
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+}
+
+model TenantLocation {
+  id         String   @id @default(cuid())
+  tenant_id  String
+  name       String
+  code       String?
+  address    String?
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+
+  @@unique([tenant_id, name])
+  @@index([tenant_id, is_active])
+}
+
+model TenantSalesCompany {
+  id                   String   @id @default(cuid())
+  tenant_id            String
+  name                 String
+  legal_name           String?
+  gstin                String?
+  phone                String?
+  email                String?
+  address              String?
+  state                String?
+  state_code           String?
+  is_gst_enabled       Boolean?
+  is_active            Boolean  @default(true)
+  same_as_main_company Boolean  @default(false)
+  created_at           DateTime @default(now())
+  updated_at           DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id])
+
+  @@unique([tenant_id, name])
+  @@index([tenant_id, is_active])
+}
+
+model SubscriptionPlan {
+  id                  String   @id @default(cuid())
+  code                String   @unique
+  name                String
+  description         String?
+  plan_type           PlanType
+  seat_limit          Int
+  monthly_price_minor Int
+  yearly_price_minor  Int
+  trial_days          Int      @default(0)
+  feature_limits_json Json?
+  is_active           Boolean  @default(true)
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  subscriptions TenantSubscription[]
+
+  @@index([plan_type, is_active])
+}
+
+model TenantSubscription {
+  id                 String             @id @default(cuid())
+  tenant_id          String
+  plan_id            String
+  billing_cycle      BillingCycle
+  status             SubscriptionStatus
+  seat_limit         Int
+  plan_snapshot_json Json?
+  started_at         DateTime
+  renews_at          DateTime?
+  ends_at            DateTime?
+  grace_until        DateTime?
+  trial_started_at   DateTime?
+  trial_ends_at      DateTime?
+  cancelled_at       DateTime?
+  created_at         DateTime           @default(now())
+  updated_at         DateTime           @updatedAt
+
+  tenant Tenant           @relation(fields: [tenant_id], references: [id])
+  plan   SubscriptionPlan @relation(fields: [plan_id], references: [id])
+  payments Payment[]
+
+  @@index([tenant_id, status])
+}
+
+model Payment {
+  id                  String        @id @default(cuid())
+  tenant_id           String
+  subscription_id     String?
+  gateway             String?
+  gateway_order_ref   String?
+  gateway_payment_ref String?
+  amount_minor        Int
+  currency            String        @default("INR")
+  status              PaymentStatus @default(PENDING)
+  invoice_ref         String?
+  receipt_url         String?
+  metadata_json       Json?
+  audit_trail_json    Json?
+  paid_at             DateTime?
+  created_at          DateTime      @default(now())
+  updated_at          DateTime      @updatedAt
+
+  tenant       Tenant              @relation(fields: [tenant_id], references: [id])
+  subscription TenantSubscription? @relation(fields: [subscription_id], references: [id])
+
+  @@index([tenant_id, status])
+  @@index([gateway_payment_ref])
+}
+
+model Device {
+  id                       String        @id @default(cuid())
+  tenant_id                String
+  account_id               String
+  device_fingerprint_hash  String
+  device_name              String?
+  platform                 String?
+  os_version               String?
+  app_version              String?
+  is_active                Boolean       @default(true)
+  first_seen_at            DateTime      @default(now())
+  last_seen_at             DateTime      @default(now())
+  revoked_at               DateTime?
+  created_at               DateTime      @default(now())
+  updated_at               DateTime      @updatedAt
+
+  tenant   Tenant  @relation(fields: [tenant_id], references: [id])
+  account  Account @relation(fields: [account_id], references: [id])
+  runtime_sessions RuntimeSession[]
+
+  @@unique([tenant_id, device_fingerprint_hash])
+  @@index([tenant_id, account_id, is_active])
+}
+
+model RuntimeSession {
+  id            String       @id @default(cuid())
+  tenant_id      String
+  account_id     String
+  device_id      String?
+  jti            String       @unique
+  scope          SessionScope
+  issued_at      DateTime     @default(now())
+  expires_at     DateTime
+  revoked_at     DateTime?
+  revoke_reason  String?
+  last_seen_at   DateTime     @default(now())
+  created_at     DateTime     @default(now())
+
+  tenant  Tenant  @relation(fields: [tenant_id], references: [id])
+  account Account @relation(fields: [account_id], references: [id])
+  device  Device? @relation(fields: [device_id], references: [id])
+
+  @@index([tenant_id, account_id, revoked_at, expires_at])
+}
+
+model Release {
+  id                            String           @id @default(cuid())
+  channel                       ReleaseChannel
+  platform                      ReleasePlatform
+  version                       String
+  artifact_url                  String
+  checksum_sha256               String?
+  min_supported_core_version    String?
+  min_supported_platform_version String?
+  notes                         String?
+  is_active                     Boolean          @default(true)
+  created_at                    DateTime         @default(now())
+  updated_at                    DateTime         @updatedAt
+
+  @@index([channel, platform, is_active, created_at])
+}
+
+model OpsUser {
+  id            String        @id @default(cuid())
+  email         String        @unique
+  name          String
+  password_hash String
+  role          OpsRole       @default(ADMIN)
+  status        AccountStatus @default(ACTIVE)
+  last_login_at DateTime?
+  created_at    DateTime      @default(now())
+  updated_at    DateTime      @updatedAt
+}
+
+model OpsAuditLog {
+  id            String   @id @default(cuid())
+  actor_type    String
+  actor_id      String?
+  tenant_id     String?
+  entity_type   String
+  entity_id     String?
+  action        String
+  metadata_json Json?
+  created_at    DateTime @default(now())
+
+  tenant Tenant? @relation(fields: [tenant_id], references: [id])
+
+  @@index([tenant_id, action])
+  @@index([created_at])
+}
+
+model PlatformNotification {
+  id           String               @id @default(cuid())
+  tenant_id    String?
+  account_id   String?
+  type         String
+  title        String
+  body         String?
+  severity     NotificationSeverity @default(INFO)
+  payload_json Json?
+  is_read      Boolean              @default(false)
+  created_at   DateTime             @default(now())
+
+  tenant  Tenant?  @relation(fields: [tenant_id], references: [id])
+  account Account? @relation(fields: [account_id], references: [id])
+
+  @@index([tenant_id, is_read])
+  @@index([account_id, is_read])
+}
+
+model AccountVerification {
+  id         String              @id @default(cuid())
+  account_id String
+  channel    VerificationChannel
+  purpose    VerificationPurpose
+  target     String
+  code_hash  String
+  expires_at DateTime
+  consumed_at DateTime?
+  created_at DateTime            @default(now())
+
+  account Account @relation(fields: [account_id], references: [id])
+
+  @@index([account_id, channel, purpose, expires_at])
+  @@index([target, consumed_at])
+}

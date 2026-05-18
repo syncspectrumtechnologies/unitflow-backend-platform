@@ -1,0 +1,39 @@
+{
+  "name": "unitflow-platform-api",
+  "version": "1.0.0",
+  "description": "UnitFlow SaaS control-plane API for accounts, paid onboarding, subscriptions, releases, and ops workflows.",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate deploy",
+    "platform:create-ops-admin": "node scripts/create-ops-admin.js",
+    "platform:create-super-admin": "node scripts/create-super-admin.js",
+    "platform:maintenance": "node scripts/subscription-maintenance.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.11.1",
+    "axios": "^1.13.4",
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.3",
+    "nodemailer": "^8.0.2",
+    "prisma": "^6.11.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.11"
+  },
+  "overrides": {
+    "effect": "^3.20.0"
+  },
+  "author": "Sync Spectrum Technologies",
+  "license": "ISC"
+  
+}
+

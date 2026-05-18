@@ -1,0 +1,1 @@
+-- No schema change required for paid onboarding compatibility.
