@@ -15,6 +15,9 @@ router.post('/tenants/:tenantId/provisioning/retry', controller.retryProvisionin
 router.get('/provisioning/queue', controller.listProvisioningQueue);
 router.post('/provisioning/run', controller.runProvisioningQueue);
 router.get('/notifications', controller.listNotifications);
+router.get('/coupons', controller.listCoupons);
+router.post('/coupons', controller.createCoupon);
+router.patch('/coupons/:couponId', controller.updateCoupon);
 router.post('/releases', controller.createRelease);
 router.patch('/releases/:releaseId', controller.updateRelease);
 module.exports = router;

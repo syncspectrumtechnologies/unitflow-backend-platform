@@ -102,6 +102,91 @@ exports.updateRelease = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
+exports.listCoupons = async (req, res, next) => {
+  try {
+    const coupons = await prisma.coupon.findMany({
+      include: {
+        created_by: { select: { id: true, email: true, name: true } },
+        redemptions: {
+          select: { id: true, account_id: true, payment_id: true, status: true, discount_minor: true, applied_at: true },
+          orderBy: { applied_at: 'desc' },
+          take: 10
+        }
+      },
+      orderBy: { created_at: 'desc' }
+    });
+    res.json({ ok: true, coupons });
+  } catch (error) { next(error); }
+};
+
+exports.createCoupon = async (req, res, next) => {
+  try {
+    const {
+      code,
+      name,
+      description,
+      discount_type,
+      amount_minor,
+      percentage_off,
+      max_discount_minor,
+      min_amount_minor,
+      currency,
+      usage_limit,
+      per_account_limit,
+      first_payment_only,
+      applies_to_plan_codes,
+      active_from,
+      expires_at,
+      is_active = true,
+      metadata_json
+    } = req.body || {};
+
+    if (!code || !name || !discount_type) {
+      throw httpError(400, 'code, name, and discount_type are required');
+    }
+
+    const coupon = await prisma.coupon.create({
+      data: {
+        code: String(code).trim().toUpperCase(),
+        name: String(name).trim(),
+        description: description || null,
+        discount_type,
+        amount_minor: amount_minor ?? null,
+        percentage_off: percentage_off ?? null,
+        max_discount_minor: max_discount_minor ?? null,
+        min_amount_minor: min_amount_minor ?? null,
+        currency: currency || 'INR',
+        usage_limit: usage_limit ?? null,
+        per_account_limit: per_account_limit ?? 1,
+        first_payment_only: first_payment_only !== false,
+        applies_to_plan_codes: Array.isArray(applies_to_plan_codes) ? applies_to_plan_codes : undefined,
+        active_from: active_from ? new Date(active_from) : null,
+        expires_at: expires_at ? new Date(expires_at) : null,
+        is_active: is_active !== false,
+        metadata_json: metadata_json || undefined,
+        created_by_account_id: null
+      }
+    });
+    await createAudit({ actorType: 'OPS', actorId: req.opsUser.id, entityType: 'coupon', entityId: coupon.id, action: 'coupon.created' });
+    res.status(201).json({ ok: true, coupon });
+  } catch (error) { next(error); }
+};
+
+exports.updateCoupon = async (req, res, next) => {
+  try {
+    const payload = { ...(req.body || {}) };
+    if (payload.code) payload.code = String(payload.code).trim().toUpperCase();
+    if (payload.active_from !== undefined) payload.active_from = payload.active_from ? new Date(payload.active_from) : null;
+    if (payload.expires_at !== undefined) payload.expires_at = payload.expires_at ? new Date(payload.expires_at) : null;
+    const coupon = await prisma.coupon.update({
+      where: { id: req.params.couponId },
+      data: payload
+    });
+    await createAudit({ actorType: 'OPS', actorId: req.opsUser.id, entityType: 'coupon', entityId: coupon.id, action: 'coupon.updated' });
+    res.json({ ok: true, coupon });
+  } catch (error) { next(error); }
+};
+
 exports.listProvisioningQueue = async (req, res, next) => {
   try {
     const queue = await listProvisioningQueue();

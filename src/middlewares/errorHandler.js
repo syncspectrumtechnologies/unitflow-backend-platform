@@ -13,6 +13,8 @@ module.exports = function errorHandler(err, req, res, next) {
   res.status(status).json({
     ok: false,
     message: err.message || 'Internal server error',
+    code: err.details?.code || err.code || undefined,
+    login_required: err.details?.login_required || undefined,
     details: err.details || undefined,
     request_id: req.request_id
   });

@@ -5,7 +5,9 @@ const { verifyAccountToken } = require('../utils/security');
 module.exports = async function accountAuthMiddleware(req, res, next) {
   try {
     const authHeader = req.headers.authorization || '';
-    if (!authHeader.startsWith('Bearer ')) throw httpError(401, 'Unauthorized');
+    if (!authHeader.startsWith('Bearer ')) {
+      throw httpError(401, 'Unauthorized', { code: 'AUTH_LOGIN_REQUIRED', login_required: true });
+    }
     const token = authHeader.slice(7).trim();
     const decoded = verifyAccountToken(token);
     const session = await prisma.platformSession.findFirst({
@@ -16,13 +18,16 @@ module.exports = async function accountAuthMiddleware(req, res, next) {
         expires_at: { gt: new Date() }
       }
     });
-    if (!session) throw httpError(401, 'Session is invalid or expired');
+    if (!session) throw httpError(401, 'Session is invalid or expired', { code: 'AUTH_TOKEN_EXPIRED', login_required: true });
     const account = await prisma.account.findFirst({ where: { id: decoded.account_id, status: 'ACTIVE' } });
-    if (!account) throw httpError(401, 'Account is inactive');
+    if (!account) throw httpError(401, 'Account is inactive', { code: 'AUTH_LOGIN_REQUIRED', login_required: true });
     req.account = account;
     req.session = session;
     next();
   } catch (error) {
-    next(error.statusCode ? error : httpError(401, 'Authentication failed'));
+    if (error?.name === 'TokenExpiredError') {
+      return next(httpError(401, 'Session has expired', { code: 'AUTH_TOKEN_EXPIRED', login_required: true }));
+    }
+    next(error.statusCode ? error : httpError(401, 'Authentication failed', { code: 'AUTH_LOGIN_REQUIRED', login_required: true }));
   }
 };

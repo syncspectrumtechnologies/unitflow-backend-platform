@@ -1,4 +1,5 @@
 const nodemailer = require('nodemailer');
+const axios = require('axios');
 const prisma = require('../config/db');
 const { env } = require('../config/env');
 const logger = require('../utils/logger');
@@ -40,11 +41,42 @@ async function maybeSendEmail(target, subject, text) {
   });
 
   await transporter.sendMail({
-    from: process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER,
+    from: process.env.SMTP_FROM_NAME
+      ? `"${process.env.SMTP_FROM_NAME}" <${process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER}>`
+      : (process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER),
     to: target,
     subject,
     text
   });
+  return true;
+}
+
+async function maybeSendSms(target, text) {
+  if (!env.twilioAccountSid || !env.twilioAuthToken || !env.twilioSmsFrom) {
+    logger.info('Skipping outbound SMS because Twilio is not configured', { phone_target: target });
+    return false;
+  }
+
+  const params = new URLSearchParams();
+  params.set('To', target);
+  params.set('From', env.twilioSmsFrom);
+  params.set('Body', text);
+
+  await axios.post(
+    `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(env.twilioAccountSid)}/Messages.json`,
+    params.toString(),
+    {
+      auth: {
+        username: env.twilioAccountSid,
+        password: env.twilioAuthToken
+      },
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      timeout: 10000
+    }
+  );
+
   return true;
 }
 
@@ -84,6 +116,8 @@ async function createVerification({ accountId, channel, purpose, target }) {
 
   if (normalizedChannel === 'EMAIL') {
     await maybeSendEmail(normalizedTarget, 'UnitFlow verification code', `Your UnitFlow verification code is ${code}. It expires in ${env.verificationCodeTtlMinutes} minutes.`);
+  } else if (normalizedChannel === 'PHONE') {
+    await maybeSendSms(normalizedTarget, `Your UnitFlow verification code is ${code}. It expires in ${env.verificationCodeTtlMinutes} minutes.`);
   }
 
   return { code, expires_at: expiresAt, channel: normalizedChannel, purpose: normalizedPurpose, target: normalizedTarget };

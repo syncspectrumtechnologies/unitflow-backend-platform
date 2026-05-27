@@ -4,6 +4,7 @@ const { createAudit } = require('./auditService');
 const { createNotification } = require('./notificationService');
 const { queueProvisioning, kickProvisioningWorker } = require('./provisioningService');
 const { revokeTenantRuntimeAccess } = require('./runtimeAccessService');
+const { validateCouponForCheckout } = require('./couponService');
 
 function computeRenewalDate(baseDate, billingCycle) {
   const date = new Date(baseDate);
@@ -15,13 +16,34 @@ function computeRenewalDate(baseDate, billingCycle) {
   return date;
 }
 
-async function createCheckoutPayment(db, { tenantId, accountId, plan, billingCycle, currency = 'INR', metadata = null }) {
-  const amountMinor = billingCycle === 'YEARLY' ? plan.yearly_price_minor : plan.monthly_price_minor;
+async function createCheckoutPayment(db, {
+  tenantId,
+  accountId,
+  plan,
+  billingCycle,
+  currency = 'INR',
+  metadata = null,
+  couponCode = null,
+  gatewayMode = null
+}) {
+  const baseAmountMinor = billingCycle === 'YEARLY' ? plan.yearly_price_minor : plan.monthly_price_minor;
+  const { coupon, pricing } = await validateCouponForCheckout({
+    accountId,
+    tenantId,
+    plan,
+    couponCode,
+    baseAmountMinor,
+    currency
+  });
 
   return db.payment.create({
     data: {
       tenant_id: tenantId,
-      amount_minor: amountMinor,
+      coupon_id: coupon?.id || null,
+      gateway_mode: gatewayMode || null,
+      original_amount_minor: pricing.base_amount_minor,
+      discount_minor: pricing.discount_minor,
+      amount_minor: pricing.final_amount_minor,
       currency,
       status: 'PENDING',
       gateway: 'manual-test-gateway',
@@ -30,11 +52,13 @@ async function createCheckoutPayment(db, { tenantId, accountId, plan, billingCyc
         plan_type: plan.plan_type,
         billing_cycle: billingCycle,
         account_id: accountId,
+        coupon_code: coupon?.code || null,
         ...(metadata || {})
       },
       audit_trail_json: {
         created_at: new Date().toISOString(),
-        source: 'checkout_intent'
+        source: 'checkout_intent',
+        coupon_id: coupon?.id || null
       }
     }
   });

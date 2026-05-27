@@ -4,6 +4,7 @@ const controller = require('../controllers/subscriptionController');
 
 const router = express.Router();
 router.get('/plans', controller.listPlans);
+router.post('/coupons/validate', accountAuthMiddleware, controller.validateCoupon);
 router.post('/checkout-intent', accountAuthMiddleware, controller.createCheckoutIntent);
 router.post('/webhooks/payment', controller.paymentWebhook);
 router.get('/payments', accountAuthMiddleware, controller.listPayments);

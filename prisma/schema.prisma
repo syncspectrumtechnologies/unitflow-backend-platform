@@ -67,6 +67,35 @@ enum PaymentStatus {
   REFUNDED
 }
 
+enum CouponDiscountType {
+  FIXED_AMOUNT
+  PERCENTAGE
+}
+
+enum CouponRedemptionStatus {
+  APPLIED
+  CONSUMED
+  REVERSED
+}
+
+enum ReferralRewardStatus {
+  PENDING
+  APPROVED
+  REVERSED
+  REJECTED
+}
+
+enum CreditLedgerDirection {
+  CREDIT
+  DEBIT
+}
+
+enum CreditLedgerType {
+  REFERRAL_REWARD
+  COUPON_REDEMPTION
+  MANUAL_ADJUSTMENT
+}
+
 enum SessionScope {
   CONTROL_PLANE
   RUNTIME
@@ -104,20 +133,33 @@ model Account {
   status            AccountStatus       @default(ACTIVE)
   is_super_admin    Boolean             @default(false)
   runtime_access_exempt Boolean         @default(false)
+  referral_code     String?             @unique
+  referred_by_account_id String?
+  referred_at       DateTime?
+  referral_credit_balance_minor Int     @default(0)
+  lifetime_referral_earnings_minor Int  @default(0)
   email_verified_at DateTime?
   phone_verified_at DateTime?
   last_login_at     DateTime?
   created_at        DateTime            @default(now())
   updated_at        DateTime            @updatedAt
 
+  referred_by       Account?            @relation("AccountReferrals", fields: [referred_by_account_id], references: [id])
+  referred_accounts Account[]           @relation("AccountReferrals")
   sessions          PlatformSession[]
   verifications     AccountVerification[]
   owned_tenants     Tenant[]            @relation("TenantOwner")
   devices           Device[]
   runtime_sessions  RuntimeSession[]
   notifications     PlatformNotification[]
+  created_coupons   Coupon[]            @relation("CouponCreator")
+  coupon_redemptions CouponRedemption[]
+  referral_rewards_given ReferralReward[] @relation("ReferralRewardReferrer")
+  referral_rewards_received ReferralReward[] @relation("ReferralRewardReferred")
+  credit_ledger_entries AccountCreditLedger[]
 
   @@index([status])
+  @@index([referred_by_account_id])
 }
 
 model PlatformSession {
@@ -164,6 +206,8 @@ model Tenant {
   runtime_sessions RuntimeSession[]
   notifications PlatformNotification[]
   audits        OpsAuditLog[]
+  coupon_redemptions CouponRedemption[]
+  referral_rewards ReferralReward[]
 
   @@index([owner_account_id])
   @@index([lifecycle_status])
@@ -273,14 +317,21 @@ model Payment {
   id                  String        @id @default(cuid())
   tenant_id           String
   subscription_id     String?
+  coupon_id           String?
   gateway             String?
+  gateway_mode        String?
   gateway_order_ref   String?
   gateway_payment_ref String?
+  gateway_request_id  String?
+  gateway_status      String?
+  original_amount_minor Int?
+  discount_minor      Int           @default(0)
   amount_minor        Int
   currency            String        @default("INR")
   status              PaymentStatus @default(PENDING)
   invoice_ref         String?
   receipt_url         String?
+  checkout_payload_json Json?
   metadata_json       Json?
   audit_trail_json    Json?
   paid_at             DateTime?
@@ -289,9 +340,118 @@ model Payment {
 
   tenant       Tenant              @relation(fields: [tenant_id], references: [id])
   subscription TenantSubscription? @relation(fields: [subscription_id], references: [id])
+  coupon       Coupon?             @relation(fields: [coupon_id], references: [id])
+  coupon_redemptions CouponRedemption[]
+  referral_rewards ReferralReward[]
 
   @@index([tenant_id, status])
   @@index([gateway_payment_ref])
+  @@index([coupon_id])
+}
+
+model Coupon {
+  id                  String             @id @default(cuid())
+  code                String             @unique
+  name                String
+  description         String?
+  discount_type       CouponDiscountType
+  amount_minor        Int?
+  percentage_off      Decimal?           @db.Decimal(5, 2)
+  max_discount_minor  Int?
+  min_amount_minor    Int?
+  currency            String             @default("INR")
+  usage_limit         Int?
+  per_account_limit   Int                @default(1)
+  used_count          Int                @default(0)
+  first_payment_only  Boolean            @default(true)
+  is_referral_reward  Boolean            @default(false)
+  applies_to_plan_codes Json?
+  active_from         DateTime?
+  expires_at          DateTime?
+  is_active           Boolean            @default(true)
+  metadata_json       Json?
+  created_by_account_id String?
+  created_at          DateTime           @default(now())
+  updated_at          DateTime           @updatedAt
+
+  created_by          Account?           @relation("CouponCreator", fields: [created_by_account_id], references: [id])
+  payments            Payment[]
+  redemptions         CouponRedemption[]
+
+  @@index([is_active, expires_at])
+  @@index([created_by_account_id])
+}
+
+model CouponRedemption {
+  id                  String                 @id @default(cuid())
+  coupon_id           String
+  account_id          String
+  tenant_id           String?
+  payment_id          String?
+  status              CouponRedemptionStatus @default(APPLIED)
+  discount_minor      Int
+  metadata_json       Json?
+  applied_at          DateTime               @default(now())
+  consumed_at         DateTime?
+  reversed_at         DateTime?
+  created_at          DateTime               @default(now())
+  updated_at          DateTime               @updatedAt
+
+  coupon              Coupon                 @relation(fields: [coupon_id], references: [id])
+  account             Account                @relation(fields: [account_id], references: [id])
+  tenant              Tenant?                @relation(fields: [tenant_id], references: [id])
+  payment             Payment?               @relation(fields: [payment_id], references: [id])
+
+  @@index([coupon_id, status])
+  @@index([account_id, status])
+  @@index([tenant_id, status])
+  @@index([payment_id])
+}
+
+model ReferralReward {
+  id                  String               @id @default(cuid())
+  referrer_account_id String
+  referred_account_id String
+  tenant_id           String?
+  payment_id          String?
+  reward_minor        Int
+  currency            String               @default("INR")
+  status              ReferralRewardStatus @default(PENDING)
+  notes               String?
+  metadata_json       Json?
+  approved_at         DateTime?
+  reversed_at         DateTime?
+  created_at          DateTime             @default(now())
+  updated_at          DateTime             @updatedAt
+
+  referrer            Account              @relation("ReferralRewardReferrer", fields: [referrer_account_id], references: [id])
+  referred            Account              @relation("ReferralRewardReferred", fields: [referred_account_id], references: [id])
+  tenant              Tenant?              @relation(fields: [tenant_id], references: [id])
+  payment             Payment?             @relation(fields: [payment_id], references: [id])
+
+  @@unique([referred_account_id, payment_id])
+  @@index([referrer_account_id, status])
+  @@index([referred_account_id, status])
+  @@index([tenant_id, status])
+}
+
+model AccountCreditLedger {
+  id                  String                @id @default(cuid())
+  account_id          String
+  direction           CreditLedgerDirection
+  entry_type          CreditLedgerType
+  amount_minor        Int
+  currency            String                @default("INR")
+  balance_after_minor Int
+  reference_type      String?
+  reference_id        String?
+  metadata_json       Json?
+  created_at          DateTime              @default(now())
+
+  account             Account               @relation(fields: [account_id], references: [id])
+
+  @@index([account_id, created_at])
+  @@index([reference_type, reference_id])
 }
 
 model Device {

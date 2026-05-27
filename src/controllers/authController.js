@@ -13,6 +13,7 @@ const {
 const { createAudit } = require('../services/auditService');
 const { authenticateRuntimeUser } = require('../services/coreSyncService');
 const { upsertRuntimeDevice, createRuntimeSession, isPrivilegedRuntimeAccess } = require('../services/runtimeAccessService');
+const { assignReferralCodeToAccount, resolveReferrerAccountId, getReferralDashboard } = require('../services/referralService');
 
 function normalizeEmail(value) {
   return String(value || '').toLowerCase().trim();
@@ -53,18 +54,27 @@ function buildVerificationTarget(account, channel, explicitTarget) {
 
 exports.signup = async (req, res, next) => {
   try {
-    const { email, phone, name, password } = req.body || {};
+    const { email, phone, name, password, referral_code } = req.body || {};
     if (!email || !phone || !name || !password) throw httpError(400, 'email, phone, name, and password are required');
 
     const normalizedEmail = normalizeEmail(email);
     const normalizedPhone = normalizePhone(phone);
     const existing = await prisma.account.findFirst({ where: { OR: [{ email: normalizedEmail }, { phone: normalizedPhone }] } });
     if (existing) throw httpError(409, 'An account with this email or phone already exists');
+    const referrerAccountId = referral_code ? await resolveReferrerAccountId(referral_code) : null;
 
     const passwordHash = await bcrypt.hash(String(password), 10);
     const account = await prisma.account.create({
-      data: { email: normalizedEmail, phone: normalizedPhone, name: String(name).trim(), password_hash: passwordHash }
+      data: {
+        email: normalizedEmail,
+        phone: normalizedPhone,
+        name: String(name).trim(),
+        password_hash: passwordHash,
+        referred_by_account_id: referrerAccountId,
+        referred_at: referrerAccountId ? new Date() : null
+      }
     });
+    const referralCode = await assignReferralCodeToAccount(account);
 
     const [emailVerification, phoneVerification] = await Promise.all([
       createVerification({ accountId: account.id, channel: 'EMAIL', purpose: 'SIGNUP', target: account.email }),
@@ -76,6 +86,8 @@ exports.signup = async (req, res, next) => {
     return res.status(201).json({
       ok: true,
       account_id: account.id,
+      referral_code: referralCode,
+      referred_by_account_id: referrerAccountId,
       verification_required: true,
       verification_channels: ['EMAIL', 'PHONE'],
       verification_code: env.isProduction ? undefined : emailVerification.code,
@@ -336,6 +348,7 @@ exports.runtimeLogin = async (req, res, next) => {
 
 exports.me = async (req, res, next) => {
   try {
+    const referral = await getReferralDashboard(req.account.id);
     const tenants = await prisma.tenant.findMany({
       where: { owner_account_id: req.account.id },
       include: { subscriptions: { include: { plan: true }, orderBy: { created_at: 'desc' }, take: 1 }, config: true, locations: true },
@@ -352,9 +365,13 @@ exports.me = async (req, res, next) => {
         phone_verified_at: req.account.phone_verified_at,
         status: req.account.status,
         is_super_admin: req.account.is_super_admin,
-        runtime_access_exempt: req.account.runtime_access_exempt
+        runtime_access_exempt: req.account.runtime_access_exempt,
+        referral_code: referral.referral_code,
+        referral_credit_balance_minor: referral.credit_balance_minor,
+        lifetime_referral_earnings_minor: referral.lifetime_earnings_minor
       },
-      tenants
+      tenants,
+      referral
     });
   } catch (error) {
     next(error);
