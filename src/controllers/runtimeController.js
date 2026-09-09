@@ -1,6 +1,6 @@
 const prisma = require('../config/db');
 const httpError = require('../utils/httpError');
-const { upsertRuntimeDevice, createRuntimeSession, listTenantSessions } = require('../services/runtimeAccessService');
+const { upsertRuntimeDevice, createRuntimeSession, listTenantSessions, getTenantAccessSummary } = require('../services/runtimeAccessService');
 const { createAudit } = require('../services/auditService');
 
 async function getOwnedTenant(accountId, tenantId) {
@@ -10,6 +10,23 @@ async function getOwnedTenant(accountId, tenantId) {
   });
   if (!tenant) throw httpError(404, 'Tenant not found');
   return tenant;
+}
+
+function serializeDevice(device) {
+  return {
+    id: device.id,
+    tenant_id: device.tenant_id,
+    device_name: device.device_name,
+    platform: device.platform,
+    os_version: device.os_version,
+    app_version: device.app_version,
+    is_active: device.is_active,
+    first_seen_at: device.first_seen_at,
+    last_seen_at: device.last_seen_at,
+    revoked_at: device.revoked_at,
+    created_at: device.created_at,
+    updated_at: device.updated_at
+  };
 }
 
 exports.registerDevice = async (req, res, next) => {
@@ -79,14 +96,22 @@ exports.registerDevice = async (req, res, next) => {
       }
     });
 
-    res.status(201).json({ ok: true, device, runtime_session: { id: session.id, expires_at: session.expires_at }, token, plan });
+    res.status(201).json({ ok: true, device: serializeDevice(device), runtime_session: { id: session.id, expires_at: session.expires_at }, token, plan });
   } catch (error) { next(error); }
 };
 
 exports.listDevices = async (req, res, next) => {
   try {
     const tenant = await getOwnedTenant(req.account.id, req.params.tenantId);
-    res.json({ ok: true, devices: tenant.devices });
+    res.json({ ok: true, devices: tenant.devices.map(serializeDevice) });
+  } catch (error) { next(error); }
+};
+
+exports.getAccessSummary = async (req, res, next) => {
+  try {
+    const tenant = await getOwnedTenant(req.account.id, req.params.tenantId);
+    const summary = await getTenantAccessSummary(tenant);
+    res.json({ ok: true, access: summary });
   } catch (error) { next(error); }
 };
 

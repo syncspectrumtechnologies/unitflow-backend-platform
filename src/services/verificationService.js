@@ -32,18 +32,21 @@ async function maybeSendEmail(target, subject, text) {
     return false;
   }
 
+  const secure = String(process.env.SMTP_SECURE || 'false').toLowerCase() === 'true';
+  const requireTLS = String(process.env.SMTP_STARTTLS || String(!secure)).toLowerCase() === 'true';
+  const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.CONTACT_FROM_EMAIL || process.env.SMTP_USER;
+  const fromName = process.env.SMTP_FROM_NAME || process.env.CONTACT_FROM_NAME || 'UnitFlow';
+
   const transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
     port: Number(process.env.SMTP_PORT || 587),
-    secure: String(process.env.SMTP_SECURE || 'false').toLowerCase() === 'true',
+    secure,
     auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-    requireTLS: String(process.env.SMTP_STARTTLS || 'true').toLowerCase() === 'true'
+    requireTLS
   });
 
   await transporter.sendMail({
-    from: process.env.SMTP_FROM_NAME
-      ? `"${process.env.SMTP_FROM_NAME}" <${process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER}>`
-      : (process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER),
+    from: `"${fromName}" <${fromEmail}>`,
     to: target,
     subject,
     text

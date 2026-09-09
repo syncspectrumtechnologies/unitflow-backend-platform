@@ -6,8 +6,8 @@ function newJti() {
   return crypto.randomBytes(16).toString('hex');
 }
 
-function signAccountToken(payload, expiresIn) {
-  const jti = newJti();
+function signAccountToken(payload, expiresIn, existingJti = null) {
+  const jti = existingJti || newJti();
   const token = jwt.sign({ ...payload, jti, token_type: 'account' }, process.env.JWT_SECRET, { expiresIn });
   return { token, jti };
 }

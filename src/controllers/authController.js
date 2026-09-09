@@ -19,6 +19,20 @@ function normalizeEmail(value) {
   return String(value || '').toLowerCase().trim();
 }
 
+function normalizeLoginId(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!/^[a-z0-9._-]{3,40}$/.test(text)) return '';
+  return text;
+}
+
+function resolveRuntimeIdentifier({ email, login_id, identifier }) {
+  const raw = String(login_id || identifier || email || '').trim();
+  if (!raw) return null;
+  if (raw.includes('@')) return { email: normalizeEmail(raw) };
+  const loginId = normalizeLoginId(raw);
+  return loginId ? { login_id: loginId } : null;
+}
+
 function normalizePhone(value) {
   return String(value || '').trim();
 }
@@ -52,6 +66,22 @@ function buildVerificationTarget(account, channel, explicitTarget) {
     : normalizeVerificationTarget(account.email, normalizedChannel);
 }
 
+function serializeRuntimeDevice(device) {
+  if (!device) return null;
+  return {
+    id: device.id,
+    tenant_id: device.tenant_id,
+    device_name: device.device_name,
+    platform: device.platform,
+    os_version: device.os_version,
+    app_version: device.app_version,
+    is_active: device.is_active,
+    first_seen_at: device.first_seen_at,
+    last_seen_at: device.last_seen_at,
+    revoked_at: device.revoked_at
+  };
+}
+
 exports.signup = async (req, res, next) => {
   try {
     const { email, phone, name, password, referral_code } = req.body || {};
@@ -76,10 +106,12 @@ exports.signup = async (req, res, next) => {
     });
     const referralCode = await assignReferralCodeToAccount(account);
 
-    const [emailVerification, phoneVerification] = await Promise.all([
-      createVerification({ accountId: account.id, channel: 'EMAIL', purpose: 'SIGNUP', target: account.email }),
-      createVerification({ accountId: account.id, channel: 'PHONE', purpose: 'SIGNUP', target: account.phone })
-    ]);
+    const emailVerification = await createVerification({
+      accountId: account.id,
+      channel: 'EMAIL',
+      purpose: 'SIGNUP',
+      target: account.email
+    });
 
     await createAudit({ actorType: 'ACCOUNT', actorId: account.id, entityType: 'account', entityId: account.id, action: 'account.created' });
 
@@ -89,9 +121,8 @@ exports.signup = async (req, res, next) => {
       referral_code: referralCode,
       referred_by_account_id: referrerAccountId,
       verification_required: true,
-      verification_channels: ['EMAIL', 'PHONE'],
-      verification_code: env.isProduction ? undefined : emailVerification.code,
-      phone_verification_code: env.isProduction ? undefined : phoneVerification.code
+      verification_channels: ['EMAIL'],
+      verification_code: env.isProduction ? undefined : emailVerification.code
     });
   } catch (error) {
     next(error);
@@ -102,6 +133,9 @@ exports.requestVerification = async (req, res, next) => {
   try {
     const { account_id, email, phone, channel = 'EMAIL', purpose = 'SIGNUP', target } = req.body || {};
     const normalizedChannel = normalizeVerificationChannel(channel);
+    if (normalizedChannel === 'PHONE') {
+      throw httpError(400, 'Phone verification is not available. Use email verification.');
+    }
     const normalizedPurpose = normalizeVerificationPurpose(purpose);
     const account = await findAccountForVerification({ accountId: account_id, email, phone });
     if (!account) throw httpError(404, 'Account not found');
@@ -134,6 +168,9 @@ exports.verify = async (req, res, next) => {
     if (!code) throw httpError(400, 'code is required');
 
     const normalizedChannel = normalizeVerificationChannel(channel);
+    if (normalizedChannel === 'PHONE') {
+      throw httpError(400, 'Phone verification is not available. Use email verification.');
+    }
     const normalizedPurpose = normalizeVerificationPurpose(purpose);
     const account = await findAccountForVerification({ accountId: account_id, email, phone });
     if (!account) throw httpError(404, 'Account not found');
@@ -143,8 +180,7 @@ exports.verify = async (req, res, next) => {
 
     await verifyCode({ accountId: account.id, channel: normalizedChannel, purpose: normalizedPurpose, target: resolvedTarget, code });
 
-    const updateData = normalizedChannel === 'EMAIL' ? { email_verified_at: new Date() } : { phone_verified_at: new Date() };
-    await prisma.account.update({ where: { id: account.id }, data: updateData });
+    await prisma.account.update({ where: { id: account.id }, data: { email_verified_at: new Date() } });
     await createAudit({
       actorType: 'ACCOUNT',
       actorId: account.id,
@@ -181,9 +217,9 @@ exports.login = async (req, res, next) => {
     if (!ok) throw httpError(401, 'Invalid credentials');
 
     const { token, jti } = signAccountToken({ account_id: account.id, email: account.email, is_super_admin: account.is_super_admin }, env.jwtExpiresIn);
-    const expiresAt = new Date(Date.now() + 12 * 60 * 60 * 1000);
+    const expiresAt = new Date(Date.now() + env.platformSessionTtlMs);
 
-    await prisma.platformSession.create({
+    const session = await prisma.platformSession.create({
       data: {
         account_id: account.id,
         jti,
@@ -194,6 +230,17 @@ exports.login = async (req, res, next) => {
     });
 
     await prisma.account.update({ where: { id: account.id }, data: { last_login_at: new Date() } });
+    await createAudit({
+      actorType: 'ACCOUNT',
+      actorId: account.id,
+      entityType: 'platform_session',
+      entityId: session.id,
+      action: 'account.login',
+      metadata: {
+        ip: req.ip,
+        user_agent: req.headers['user-agent'] || null
+      }
+    });
 
     return res.json({
       ok: true,
@@ -215,6 +262,8 @@ exports.runtimeLogin = async (req, res, next) => {
   try {
     const {
       email,
+      login_id,
+      identifier,
       password,
       tenant_id,
       device_fingerprint,
@@ -227,7 +276,8 @@ exports.runtimeLogin = async (req, res, next) => {
       seat_transfer_user_id = null
     } = req.body || {};
 
-    if (!email || !password) throw httpError(400, 'email and password are required');
+    const runtimeIdentity = resolveRuntimeIdentifier({ email, login_id, identifier });
+    if (!runtimeIdentity || !password) throw httpError(400, 'login_id and password are required');
     if (!tenant_id) throw httpError(400, 'tenant_id is required');
     if (!device_fingerprint) throw httpError(400, 'device_fingerprint is required');
 
@@ -235,6 +285,7 @@ exports.runtimeLogin = async (req, res, next) => {
       where: { id: tenant_id },
       include: {
         owner: true,
+        config: true,
         subscriptions: { include: { plan: true }, orderBy: { created_at: 'desc' }, take: 1 },
         devices: true
       }
@@ -245,7 +296,7 @@ exports.runtimeLogin = async (req, res, next) => {
     try {
       runtimeAuth = await authenticateRuntimeUser({
         tenant_id,
-        email: normalizeEmail(email),
+        ...runtimeIdentity,
         password: String(password)
       });
     } catch (error) {
@@ -321,7 +372,18 @@ exports.runtimeLogin = async (req, res, next) => {
         display_name: tenant.display_name,
         lifecycle_status: tenant.lifecycle_status,
         runtime_provision_status: tenant.runtime_provision_status,
-        privileged_runtime_access: privilegedAccess
+        privileged_runtime_access: privilegedAccess,
+        branding: tenant.config ? {
+          app_title: tenant.config.app_title,
+          theme_color: tenant.config.theme_color,
+          logo_url: tenant.config.logo_url,
+          invoice_header: tenant.config.invoice_header,
+          invoice_footer: tenant.config.invoice_footer,
+          locale: tenant.config.locale,
+          timezone: tenant.config.timezone,
+          enabled_modules: tenant.config.enabled_modules_json || [],
+          feature_flags: tenant.config.feature_flags_json || {}
+        } : null
       },
       user: {
         id: runtimeUser.id,
@@ -332,7 +394,7 @@ exports.runtimeLogin = async (req, res, next) => {
         roles: runtimeUser.roles,
         role
       },
-      device,
+      device: serializeRuntimeDevice(device),
       runtime_session: { id: session.id, expires_at: session.expires_at },
       plan,
       access_mode,
@@ -381,6 +443,14 @@ exports.me = async (req, res, next) => {
 exports.logout = async (req, res, next) => {
   try {
     await prisma.platformSession.update({ where: { id: req.session.id }, data: { revoked_at: new Date() } });
+    await createAudit({
+      actorType: 'ACCOUNT',
+      actorId: req.account.id,
+      entityType: 'platform_session',
+      entityId: req.session.id,
+      action: 'account.logout',
+      metadata: { ip: req.ip }
+    });
     return res.json({ ok: true });
   } catch (error) {
     next(error);

@@ -3,184 +3,150 @@ const axios = require('axios');
 const { env } = require('../config/env');
 const httpError = require('../utils/httpError');
 
-const PAYTM_IV = '@@@@&&&&####$$$$';
-
-function resolveGatewayMode(value) {
-  const normalized = String(value || env.paymentGatewayDefault || 'MANUAL').trim().toUpperCase();
-  return ['MANUAL', 'PAYTM'].includes(normalized) ? normalized : 'MANUAL';
+function resolveGatewayMode() {
+  return 'RAZORPAY';
 }
 
 function isZeroAmountCheckout(payment) {
   return Number(payment?.amount_minor || 0) <= 0;
 }
 
-function minorToMajorString(amountMinor) {
-  return (Number(amountMinor || 0) / 100).toFixed(2);
+function isRazorpayConfigured() {
+  return Boolean(env.razorpayKeyId && env.razorpayKeySecret);
 }
 
-function paytmEnvironmentBaseUrl() {
-  return env.paytmEnvironment === 'PRODUCTION'
-    ? 'https://secure.paytmpayments.com'
-    : 'https://securestage.paytmpayments.com';
-}
-
-function encryptPaytmChecksum(input, merchantKey) {
-  const key = Buffer.from(String(merchantKey || '').slice(0, 16), 'utf8');
-  const iv = Buffer.from(PAYTM_IV, 'utf8');
-  const cipher = crypto.createCipheriv('aes-128-cbc', key, iv);
-  return Buffer.concat([cipher.update(input, 'utf8'), cipher.final()]).toString('base64');
-}
-
-function generatePaytmSignature(bodyString, merchantKey) {
-  const salt = crypto.randomBytes(4).toString('hex');
-  const hash = crypto.createHash('sha256').update(`${bodyString}|${salt}`).digest('hex') + salt;
-  return encryptPaytmChecksum(hash, merchantKey);
-}
-
-function buildPaytmCheckoutPayload({ payment, tenant, account }) {
-  if (!env.paytmMid || !env.paytmMerchantKey || !env.paytmWebsite) {
-    throw httpError(500, 'Paytm gateway is not configured');
-  }
-
-  const callbackUrl = env.paytmCallbackUrl || null;
-  const body = {
-    requestType: 'Payment',
-    mid: env.paytmMid,
-    websiteName: env.paytmWebsite,
-    orderId: payment.gateway_order_ref,
-    ...(callbackUrl ? { callbackUrl } : {}),
-    txnAmount: {
-      value: minorToMajorString(payment.amount_minor),
-      currency: payment.currency || env.defaultCurrency
+function razorpayClient() {
+  if (!isRazorpayConfigured()) throw httpError(503, 'Payment gateway is not configured');
+  return axios.create({
+    baseURL: env.razorpayApiBaseUrl,
+    timeout: 15000,
+    auth: {
+      username: env.razorpayKeyId,
+      password: env.razorpayKeySecret
     },
-    userInfo: {
-      custId: account.id,
-      mobile: account.phone ? String(account.phone).replace(/^\+/, '') : undefined,
-      email: account.email,
-      firstName: account.name
-    }
-  };
-
-  const sanitizedBody = JSON.parse(JSON.stringify(body));
-  const bodyString = JSON.stringify(sanitizedBody);
-  const head = {
-    version: 'v1',
-    requestTimestamp: String(Math.floor(Date.now() / 1000)),
-    signature: generatePaytmSignature(bodyString, env.paytmMerchantKey)
-  };
-
-  if (env.paytmClientId) {
-    head.clientId = env.paytmClientId;
-  }
-
-  return {
-    request_url: `${paytmEnvironmentBaseUrl()}/theia/api/v1/initiateTransaction?mid=${encodeURIComponent(env.paytmMid)}&orderId=${encodeURIComponent(payment.gateway_order_ref)}`,
-    request_body: sanitizedBody,
-    request_head: head,
-    callback_url: callbackUrl
-  };
+    headers: { 'Content-Type': 'application/json' }
+  });
 }
 
-async function initiatePaytmTransaction({ payment, tenant, account }) {
-  const payload = buildPaytmCheckoutPayload({ payment, tenant, account });
-  const client = axios.create({
-    timeout: 12000,
-    headers: {
-      'Content-Type': 'application/json'
-    }
+function safeEqualHex(left, right) {
+  const a = Buffer.from(String(left || ''), 'hex');
+  const b = Buffer.from(String(right || ''), 'hex');
+  return a.length > 0 && a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function sign(value, secret = env.razorpayKeySecret) {
+  return crypto.createHmac('sha256', secret).update(value).digest('hex');
+}
+
+function verifyRazorpayOrderSignature({ orderId, paymentId, signature }) {
+  if (!orderId || !paymentId || !signature) return false;
+  return safeEqualHex(sign(`${orderId}|${paymentId}`), signature);
+}
+
+function verifyRazorpayWebhookSignature(rawBody, signature) {
+  if (!env.razorpayWebhookSecret) throw httpError(503, 'Payment webhook is not configured');
+  if (!rawBody || !signature) return false;
+  const body = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(String(rawBody));
+  const expected = crypto.createHmac('sha256', env.razorpayWebhookSecret).update(body).digest('hex');
+  return safeEqualHex(expected, signature);
+}
+
+async function createRazorpayOrder({ payment, tenant, account }) {
+  const notes = {
+    payment_id: payment.id,
+    tenant_id: payment.tenant_id,
+    account_id: account.id,
+    plan_code: String(payment.metadata_json?.plan_code || ''),
+    billing_cycle: String(payment.metadata_json?.billing_cycle || '')
+  };
+
+  const response = await razorpayClient().post('/orders', {
+    amount: Number(payment.amount_minor),
+    currency: payment.currency,
+    receipt: String(payment.gateway_order_ref || payment.id).slice(0, 40),
+    notes,
+    partial_payment: false
   });
 
-  const response = await client.post(payload.request_url, {
-    body: payload.request_body,
-    head: payload.request_head
-  });
-
-  const resultInfo = response?.data?.body?.resultInfo || {};
-  if (String(resultInfo.resultStatus || '').toUpperCase() !== 'S') {
-    throw httpError(502, resultInfo.resultMsg || 'Paytm initiate transaction failed');
+  const order = response.data || {};
+  if (!order.id || Number(order.amount) !== Number(payment.amount_minor) || String(order.currency || '').toUpperCase() !== String(payment.currency || '').toUpperCase()) {
+    throw httpError(502, 'Payment gateway returned an invalid order');
   }
 
-  return {
-    gateway_mode: 'PAYTM',
-    gateway: 'paytm',
-    gateway_status: resultInfo.resultStatus || 'S',
-    gateway_request_id: response?.data?.head?.requestId || null,
-    checkout_payload_json: {
-      gateway: 'paytm',
-      txn_token: response?.data?.body?.txnToken || null,
-      mid: env.paytmMid,
-      order_id: payload.request_body.orderId,
-      amount: payload.request_body.txnAmount,
-      callback_url: payload.callback_url,
-      is_redirect: Boolean(response?.data?.body?.isRedirect),
-      result_info: resultInfo
-    }
-  };
+  return order;
 }
 
-function buildManualCheckout({ payment, gatewayMode }) {
-  return {
-    gateway_mode: gatewayMode,
-    gateway: gatewayMode === 'PAYTM' ? 'paytm' : 'manual-test-gateway',
-    gateway_status: 'PENDING',
-    checkout_payload_json: {
-      gateway: gatewayMode === 'PAYTM' ? 'paytm' : 'manual',
-      instructions: gatewayMode === 'PAYTM'
-        ? 'Paytm credentials are not configured yet. Complete setup to enable live checkout.'
-        : 'Use the payment webhook endpoint to mark this payment as succeeded or failed during testing.',
-      payment_id: payment.id,
-      amount_minor: payment.amount_minor,
-      currency: payment.currency
-    }
-  };
+async function fetchRazorpayPayment(paymentId) {
+  if (!paymentId) throw httpError(400, 'razorpay_payment_id is required');
+  const response = await razorpayClient().get(`/payments/${encodeURIComponent(paymentId)}`);
+  return response.data || null;
 }
 
-async function preparePaymentCheckout({ payment, tenant, account, gatewayMode }) {
-  const resolvedGatewayMode = resolveGatewayMode(gatewayMode);
+async function preparePaymentCheckout({ payment, tenant, account }) {
   if (isZeroAmountCheckout(payment)) {
     return {
-      gateway_mode: resolvedGatewayMode,
-      gateway: resolvedGatewayMode === 'PAYTM' ? 'paytm' : 'coupon-credit',
+      gateway_mode: 'RAZORPAY',
+      gateway: 'coupon-credit',
       gateway_status: 'SUCCEEDED',
       checkout_payload_json: {
-        gateway: resolvedGatewayMode === 'PAYTM' ? 'paytm' : 'coupon-credit',
+        gateway: 'coupon-credit',
         waived: true,
         payment_id: payment.id,
-        amount_minor: payment.amount_minor
+        amount_minor: payment.amount_minor,
+        currency: payment.currency
       }
     };
   }
 
-  if (resolvedGatewayMode !== 'PAYTM') {
-    return buildManualCheckout({ payment, gatewayMode: resolvedGatewayMode });
-  }
-
-  if (!env.paytmMid || !env.paytmMerchantKey || !env.paytmWebsite) {
-    return buildManualCheckout({ payment, gatewayMode: resolvedGatewayMode });
-  }
-
-  return initiatePaytmTransaction({ payment, tenant, account });
+  const order = await createRazorpayOrder({ payment, tenant, account });
+  return {
+    gateway_mode: 'RAZORPAY',
+    gateway: 'razorpay',
+    gateway_status: order.status || 'created',
+    gateway_order_ref: order.id,
+    gateway_request_id: order.id,
+    checkout_payload_json: {
+      gateway: 'razorpay',
+      key: env.razorpayKeyId,
+      order_id: order.id,
+      payment_id: payment.id,
+      amount_minor: Number(order.amount),
+      currency: order.currency,
+      name: env.appName || 'UnitFlow',
+      description: `${payment.metadata_json?.plan_code || 'UnitFlow'} ${payment.metadata_json?.billing_cycle || ''}`.trim(),
+      prefill: {
+        name: account.name || '',
+        email: account.email || '',
+        contact: account.phone || ''
+      },
+      notes: order.notes || {},
+      theme: {
+        color: tenant?.config?.theme_color || '#1f6f5b'
+      }
+    }
+  };
 }
 
-function normalizeExternalPaymentStatus({ gateway, status, paytm }) {
+function normalizeExternalPaymentStatus({ status, razorpay }) {
   if (status) {
     const normalized = String(status).trim().toUpperCase();
     if (['SUCCEEDED', 'FAILED', 'REFUNDED', 'PENDING'].includes(normalized)) return normalized;
   }
 
-  if (String(gateway || '').toUpperCase() === 'PAYTM' && paytm?.body?.resultInfo) {
-    const resultStatus = String(paytm.body.resultInfo.resultStatus || '').toUpperCase();
-    if (resultStatus === 'S') return 'SUCCEEDED';
-    if (resultStatus === 'F') return 'FAILED';
-    return 'PENDING';
-  }
-
+  const gatewayStatus = String(razorpay?.status || '').toLowerCase();
+  if (['captured', 'paid'].includes(gatewayStatus)) return 'SUCCEEDED';
+  if (['failed', 'cancelled'].includes(gatewayStatus)) return 'FAILED';
+  if (gatewayStatus === 'refunded') return 'REFUNDED';
   return 'PENDING';
 }
 
 module.exports = {
-  resolveGatewayMode,
+  fetchRazorpayPayment,
+  isRazorpayConfigured,
   isZeroAmountCheckout,
+  normalizeExternalPaymentStatus,
   preparePaymentCheckout,
-  normalizeExternalPaymentStatus
+  resolveGatewayMode,
+  verifyRazorpayOrderSignature,
+  verifyRazorpayWebhookSignature
 };

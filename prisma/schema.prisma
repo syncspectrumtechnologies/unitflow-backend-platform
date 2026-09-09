@@ -223,6 +223,8 @@ model TenantConfig {
   invoice_footer  String?
   locale          String?  @default("en-IN")
   timezone        String?  @default("Asia/Kolkata")
+  enabled_modules_json Json?
+  feature_flags_json   Json?
   created_at      DateTime @default(now())
   updated_at      DateTime @updatedAt
 
@@ -345,6 +347,7 @@ model Payment {
   referral_rewards ReferralReward[]
 
   @@index([tenant_id, status])
+  @@index([gateway_order_ref])
   @@index([gateway_payment_ref])
   @@index([coupon_id])
 }

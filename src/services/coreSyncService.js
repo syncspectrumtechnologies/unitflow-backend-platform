@@ -65,4 +65,79 @@ async function authenticateRuntimeUser(payload) {
   }
 }
 
-module.exports = { provisionTenant, syncTenantStatus, syncTenantConfig, authenticateRuntimeUser };
+async function listRuntimeUsers(tenantId, params = {}) {
+  try {
+    const res = await client().get(`/internal/platform/tenants/${tenantId}/users`, { params });
+    return res.data;
+  } catch (error) {
+    throw withRemoteErrorContext(error, 'Core runtime users fetch failed');
+  }
+}
+
+async function createRuntimeUser(tenantId, payload) {
+  try {
+    const res = await client().post(`/internal/platform/tenants/${tenantId}/users`, payload);
+    return res.data;
+  } catch (error) {
+    throw withRemoteErrorContext(error, 'Core runtime user creation failed');
+  }
+}
+
+async function listRuntimeRoles(tenantId, params = {}) {
+  try {
+    const res = await client().get(`/internal/platform/tenants/${tenantId}/roles`, { params });
+    return res.data;
+  } catch (error) {
+    throw withRemoteErrorContext(error, 'Core runtime roles fetch failed');
+  }
+}
+
+async function createRuntimeRole(tenantId, payload) {
+  try {
+    const res = await client().post(`/internal/platform/tenants/${tenantId}/roles`, payload);
+    return res.data;
+  } catch (error) {
+    throw withRemoteErrorContext(error, 'Core runtime role creation failed');
+  }
+}
+
+async function assignRuntimeUserRole(tenantId, userId, payload) {
+  try {
+    const res = await client().post(`/internal/platform/tenants/${tenantId}/users/${userId}/roles`, payload);
+    return res.data;
+  } catch (error) {
+    throw withRemoteErrorContext(error, 'Core runtime role assignment failed');
+  }
+}
+
+async function listRuntimePermissions(tenantId) {
+  try {
+    const res = await client().get(`/internal/platform/tenants/${tenantId}/permissions`);
+    return res.data;
+  } catch (error) {
+    throw withRemoteErrorContext(error, 'Core runtime permissions fetch failed');
+  }
+}
+
+async function attachRuntimeRolePermissions(tenantId, roleId, payload) {
+  try {
+    const res = await client().post(`/internal/platform/tenants/${tenantId}/roles/${roleId}/permissions`, payload);
+    return res.data;
+  } catch (error) {
+    throw withRemoteErrorContext(error, 'Core runtime permission assignment failed');
+  }
+}
+
+module.exports = {
+  provisionTenant,
+  syncTenantStatus,
+  syncTenantConfig,
+  authenticateRuntimeUser,
+  listRuntimeUsers,
+  createRuntimeUser,
+  listRuntimeRoles,
+  createRuntimeRole,
+  assignRuntimeUserRole,
+  listRuntimePermissions,
+  attachRuntimeRolePermissions
+};

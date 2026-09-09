@@ -1,6 +1,7 @@
 const prisma = require('../config/db');
 const httpError = require('../utils/httpError');
 const { safeSlug } = require('../utils/security');
+const { redact } = require('../utils/redact');
 const { createAudit } = require('../services/auditService');
 const { createNotification } = require('../services/notificationService');
 const { getPlanByCode } = require('../services/planService');
@@ -8,10 +9,57 @@ const { createCheckoutPayment } = require('../services/subscriptionService');
 const { env } = require('../config/env');
 const { queueProvisioning, buildProvisioningVersion, kickProvisioningWorker } = require('../services/provisioningService');
 const { isPrivilegedRuntimeAccess } = require('../services/runtimeAccessService');
-const { prepareCheckoutResponse, finalizeSuccessfulPayment } = require('../services/checkoutService');
+const { prepareCheckoutResponse, completeSuccessfulCheckout } = require('../services/checkoutService');
 const { isZeroAmountCheckout, resolveGatewayMode } = require('../services/paymentGatewayService');
+const { detectCountry, detectCurrency, planPriceMinor } = require('../services/pricingService');
 const { getReferralDashboard } = require('../services/referralService');
 const { listAccountCoupons } = require('../services/couponService');
+const { serializePayment } = require('../utils/billingSerializer');
+
+const ERP_MODULES = [
+  'dashboard',
+  'orders',
+  'inventory',
+  'production',
+  'purchases',
+  'clients',
+  'products',
+  'categories',
+  'invoices',
+  'payments',
+  'accounting',
+  'tally',
+  'chat',
+  'broadcast',
+  'messages',
+  'factories'
+];
+
+const DEFAULT_ERP_FEATURE_FLAGS = {
+  auto_deduct_inventory_on_dispatch: true,
+  keyboard_shortcuts: true,
+  simple_mode: true,
+  low_stock_suggestions: true,
+  order_shortage_warnings: true
+};
+
+function normalizeEnabledModules(value, fallback = ERP_MODULES) {
+  const allowed = new Set(ERP_MODULES);
+  const source = Array.isArray(value) ? value : fallback;
+  const modules = source
+    .map((item) => String(item || '').trim().toLowerCase())
+    .filter((item) => allowed.has(item));
+  return [...new Set(modules.length ? modules : fallback)];
+}
+
+function normalizeFeatureFlags(value, fallback = DEFAULT_ERP_FEATURE_FLAGS) {
+  const incoming = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const merged = { ...fallback };
+  for (const key of Object.keys(DEFAULT_ERP_FEATURE_FLAGS)) {
+    if (typeof incoming[key] === 'boolean') merged[key] = incoming[key];
+  }
+  return merged;
+}
 
 async function assertOwner(tenantId, accountId) {
   const tenant = await prisma.tenant.findFirst({
@@ -112,7 +160,9 @@ function buildOnboardingSuggestions({ account, displayName, legalName, slug, bra
       invoice_header: branding.invoice_header || null,
       invoice_footer: branding.invoice_footer || null,
       locale: branding.locale || 'en-IN',
-      timezone: branding.timezone || 'Asia/Kolkata'
+      timezone: branding.timezone || 'Asia/Kolkata',
+      enabled_modules: normalizeEnabledModules(branding.enabled_modules_json || branding.enabled_modules),
+      feature_flags: normalizeFeatureFlags(branding.feature_flags_json || branding.feature_flags)
     },
     locations: normalizedLocations,
     sales_companies: suggestedSalesCompanies
@@ -129,8 +179,8 @@ function buildOnboardingSteps(tenant) {
     },
     {
       key: 'verification',
-      label: 'Owner verification',
-      completed: Boolean(tenant?.owner?.email_verified_at && tenant?.owner?.phone_verified_at)
+      label: 'Owner email verification',
+      completed: Boolean(tenant?.owner?.email_verified_at)
     },
     {
       key: 'branding',
@@ -287,7 +337,7 @@ exports.onboardPaidTenant = async (req, res, next) => {
     } = req.body || {};
 
     const privilegedOwner = Boolean(req.account.is_super_admin && req.account.runtime_access_exempt);
-    if (!req.account.email_verified_at || !req.account.phone_verified_at) throw httpError(403, 'Email and phone verification are required before onboarding');
+    if (!req.account.email_verified_at) throw httpError(403, 'Email verification is required before onboarding');
 
     const requestedTenant = tenant_id ? await assertOwner(tenant_id, req.account.id) : null;
     const reusableTenant = requestedTenant || await findReusableTenant(req.account.id);
@@ -373,7 +423,9 @@ exports.onboardPaidTenant = async (req, res, next) => {
               invoice_header: suggested.branding.invoice_header,
               invoice_footer: suggested.branding.invoice_footer,
               locale: suggested.branding.locale,
-              timezone: suggested.branding.timezone
+              timezone: suggested.branding.timezone,
+              enabled_modules_json: suggested.branding.enabled_modules,
+              feature_flags_json: suggested.branding.feature_flags
             }
           });
         } else {
@@ -386,7 +438,9 @@ exports.onboardPaidTenant = async (req, res, next) => {
               invoice_header: suggested.branding.invoice_header,
               invoice_footer: suggested.branding.invoice_footer,
               locale: suggested.branding.locale,
-              timezone: suggested.branding.timezone
+              timezone: suggested.branding.timezone,
+              enabled_modules_json: suggested.branding.enabled_modules,
+              feature_flags_json: suggested.branding.feature_flags
             }
           });
         }
@@ -415,7 +469,9 @@ exports.onboardPaidTenant = async (req, res, next) => {
             invoice_header: suggested.branding.invoice_header,
             invoice_footer: suggested.branding.invoice_footer,
             locale: suggested.branding.locale,
-            timezone: suggested.branding.timezone
+            timezone: suggested.branding.timezone,
+            enabled_modules_json: suggested.branding.enabled_modules,
+            feature_flags_json: suggested.branding.feature_flags
           }
         });
 
@@ -427,13 +483,21 @@ exports.onboardPaidTenant = async (req, res, next) => {
         return { ...workspace, payment: null };
       }
 
+      const currency = detectCurrency(req);
+      const baseAmountMinor = planPriceMinor(plan, normalizedBillingCycle, currency);
       const payment = await createCheckoutPayment(tx, {
         tenantId: workspace.id,
         accountId: req.account.id,
         plan,
         billingCycle: normalizedBillingCycle,
-        currency: env.defaultCurrency,
-        metadata: { source: 'self_serve_onboarding', display_name: effectiveDisplayName },
+        currency,
+        baseAmountMinor,
+        metadata: {
+          source: 'self_serve_onboarding',
+          display_name: effectiveDisplayName,
+          country: detectCountry(req),
+          base_currency: env.defaultCurrency
+        },
         couponCode: coupon_code,
         gatewayMode: resolveGatewayMode(gateway_mode)
       });
@@ -499,34 +563,35 @@ exports.onboardPaidTenant = async (req, res, next) => {
       gatewayMode: gateway_mode
     });
 
-    if (isZeroAmountCheckout(preparedPayment)) {
-      const succeededPayment = await prisma.payment.update({
-        where: { id: preparedPayment.id },
-        data: {
-          status: 'SUCCEEDED',
-          paid_at: new Date(),
-          gateway_status: 'SUCCEEDED'
-        }
-      });
-      const subscription = await finalizeSuccessfulPayment({
+    const shouldCompleteImmediately = isZeroAmountCheckout(preparedPayment);
+    if (shouldCompleteImmediately) {
+      const { payment: succeededPayment, subscription } = await completeSuccessfulCheckout({
         tenant: hydratedTenant,
         plan,
         billingCycle: normalizedBillingCycle,
-        payment: succeededPayment,
-        metadata: { zero_amount_checkout: true, source: 'self_serve_onboarding' }
+        payment: preparedPayment,
+        metadata: {
+          zero_amount_checkout: true,
+          source: 'self_serve_onboarding',
+          payment_reference_prefix: 'ZERO',
+          audit_trail: { zero_amount_checkout: true }
+        }
       });
 
       return res.status(201).json({
         ok: true,
+        message: 'Checkout completed with zero payable amount. Your plan is active and workspace provisioning has been queued.',
         tenant_id: tenant.id,
         lifecycle_status: 'SUSPENDED',
-        runtime_provision_status: 'PAYMENT_PENDING',
-        onboarding_status: 'PROFILE_COMPLETED',
+        runtime_provision_status: 'QUEUED',
+        onboarding_status: 'PROVISIONING',
         plan_code: plan.code,
         billing_cycle: normalizedBillingCycle,
         payment: succeededPayment,
         checkout,
         auto_activated: true,
+        demo_checkout: false,
+        provisioning: 'queued',
         subscription_id: subscription.id
       });
     }
@@ -630,7 +695,9 @@ exports.saveOnboardingDraft = async (req, res, next) => {
           invoice_header: suggested.branding.invoice_header,
           invoice_footer: suggested.branding.invoice_footer,
           locale: suggested.branding.locale,
-          timezone: suggested.branding.timezone
+          timezone: suggested.branding.timezone,
+          enabled_modules_json: suggested.branding.enabled_modules,
+          feature_flags_json: suggested.branding.feature_flags
         },
         create: {
           tenant_id: workspace.id,
@@ -640,7 +707,9 @@ exports.saveOnboardingDraft = async (req, res, next) => {
           invoice_header: suggested.branding.invoice_header,
           invoice_footer: suggested.branding.invoice_footer,
           locale: suggested.branding.locale,
-          timezone: suggested.branding.timezone
+          timezone: suggested.branding.timezone,
+          enabled_modules_json: suggested.branding.enabled_modules,
+          feature_flags_json: suggested.branding.feature_flags
         }
       });
 
@@ -658,10 +727,17 @@ exports.saveOnboardingDraft = async (req, res, next) => {
       action: 'tenant.onboarding.draft_saved'
     });
 
+    let queueResult = null;
+    if (saved.runtime_company_id) {
+      queueResult = await queueProvisioning({ tenantId: saved.id, reason: 'onboarding_draft_update', actorType: 'ACCOUNT', actorId: req.account.id });
+      kickProvisioningWorker();
+    }
+
     const tenant = await assertOwner(saved.id, req.account.id);
     return res.status(existingTenant ? 200 : 201).json({
       ok: true,
       tenant: serializeTenant(tenant),
+      provisioning: queueResult,
       suggestions: {
         slug: uniqueSlug,
         branding: suggested.branding,
@@ -681,6 +757,8 @@ exports.getDashboard = async (req, res, next) => {
       prisma.payment.findMany({
         where: { tenant_id: tenant.id },
         include: {
+          tenant: { select: { id: true, display_name: true, legal_name: true, slug: true } },
+          subscription: { include: { plan: true } },
           coupon: {
             select: { id: true, code: true, name: true, discount_type: true }
           }
@@ -717,6 +795,7 @@ exports.getDashboard = async (req, res, next) => {
     ]);
 
     const latestSubscription = tenant.subscriptions?.[0] || null;
+    const safePayments = payments.map((payment) => serializePayment(payment));
     return res.json({
       ok: true,
       dashboard: {
@@ -745,9 +824,9 @@ exports.getDashboard = async (req, res, next) => {
         billing: {
           plan_details: latestSubscription?.plan || null,
           payment_summary: paymentSummary,
-          payments,
-          pending_payment: payments.find((payment) => payment.status === 'PENDING') || null,
-          latest_successful_payment: payments.find((payment) => payment.status === 'SUCCEEDED') || null
+          payments: safePayments,
+          pending_payment: safePayments.find((payment) => payment.status === 'PENDING') || null,
+          latest_successful_payment: safePayments.find((payment) => payment.status === 'SUCCEEDED') || null
         },
         runtime: {
           device_count: tenant.devices?.length || 0,
@@ -777,6 +856,31 @@ exports.getReferralPage = async (req, res, next) => {
       referral,
       coupons
     });
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.getAuditHistory = async (req, res, next) => {
+  try {
+    const tenant = await assertOwner(req.params.tenantId, req.account.id);
+    const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit || '25'), 10) || 25, 1), 100);
+    const audits = await prisma.opsAuditLog.findMany({
+      where: { tenant_id: tenant.id },
+      orderBy: { created_at: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        actor_type: true,
+        actor_id: true,
+        entity_type: true,
+        entity_id: true,
+        action: true,
+        metadata_json: true,
+        created_at: true
+      }
+    });
+    res.json({ ok: true, tenant_id: tenant.id, audits: audits.map((item) => ({ ...item, metadata_json: redact(item.metadata_json || {}) })) });
   } catch (error) {
     next(error);
   }
@@ -817,11 +921,17 @@ exports.getOne = async (req, res, next) => {
 exports.updateConfig = async (req, res, next) => {
   try {
     const tenant = await assertOwner(req.params.tenantId, req.account.id);
-    const { branding = {}, locations, sales_companies, company = {} } = req.body || {};
+    const { branding = {}, locations, sales_companies, company = {}, enabled_modules, feature_flags } = req.body || {};
 
     const baseDisplayName = company.display_name || tenant.display_name;
     const baseLegalName = company.legal_name !== undefined ? company.legal_name : tenant.legal_name;
     const baseLocations = Array.isArray(locations) ? locations : tenant.locations;
+    const nextEnabledModules = normalizeEnabledModules(
+      enabled_modules || branding.enabled_modules || tenant.config?.enabled_modules_json
+    );
+    const nextFeatureFlags = normalizeFeatureFlags(
+      feature_flags || branding.feature_flags || tenant.config?.feature_flags_json
+    );
     const existingSalesCompanies = (tenant.sales_companies || []).map((item) => ({
       name: item.name,
       legal_name: item.legal_name,
@@ -852,16 +962,30 @@ exports.updateConfig = async (req, res, next) => {
           onboarding_status: tenant.runtime_provision_status === 'READY' ? 'READY' : tenant.onboarding_status
         }
       });
-      await tx.tenantConfig.update({
+      await tx.tenantConfig.upsert({
         where: { tenant_id: tenant.id },
-        data: {
+        update: {
           theme_color: branding.theme_color || undefined,
           logo_url: branding.logo_url !== undefined ? branding.logo_url : undefined,
           app_title: branding.app_title || undefined,
           invoice_header: branding.invoice_header !== undefined ? branding.invoice_header : undefined,
           invoice_footer: branding.invoice_footer !== undefined ? branding.invoice_footer : undefined,
           locale: branding.locale || undefined,
-          timezone: branding.timezone || undefined
+          timezone: branding.timezone || undefined,
+          enabled_modules_json: nextEnabledModules,
+          feature_flags_json: nextFeatureFlags
+        },
+        create: {
+          tenant_id: tenant.id,
+          theme_color: branding.theme_color || tenant.config?.theme_color || '#1F6FEB',
+          logo_url: branding.logo_url !== undefined ? branding.logo_url : tenant.config?.logo_url || null,
+          app_title: branding.app_title || tenant.config?.app_title || tenant.display_name,
+          invoice_header: branding.invoice_header !== undefined ? branding.invoice_header : tenant.config?.invoice_header || null,
+          invoice_footer: branding.invoice_footer !== undefined ? branding.invoice_footer : tenant.config?.invoice_footer || null,
+          locale: branding.locale || tenant.config?.locale || 'en-IN',
+          timezone: branding.timezone || tenant.config?.timezone || 'Asia/Kolkata',
+          enabled_modules_json: nextEnabledModules,
+          feature_flags_json: nextFeatureFlags
         }
       });
       if (Array.isArray(locations)) {
@@ -880,6 +1004,7 @@ exports.updateConfig = async (req, res, next) => {
     let queueResult = null;
     if (tenant.runtime_company_id) {
       queueResult = await queueProvisioning({ tenantId: tenant.id, reason: 'config_update', actorType: 'ACCOUNT', actorId: req.account.id });
+      kickProvisioningWorker();
     }
 
     await createAudit({ actorType: 'ACCOUNT', actorId: req.account.id, tenantId: tenant.id, entityType: 'tenant', entityId: tenant.id, action: 'tenant.config.updated', metadata: { queued_sync: Boolean(queueResult) } });

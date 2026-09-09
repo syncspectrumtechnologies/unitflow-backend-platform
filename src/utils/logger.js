@@ -1,4 +1,5 @@
 const { env } = require('../config/env');
+const { redact } = require('./redact');
 
 function write(level, message, meta = {}) {
   const payload = {
@@ -6,7 +7,7 @@ function write(level, message, meta = {}) {
     level,
     service: env.serviceName,
     message,
-    ...meta
+    ...redact(meta)
   };
   console.log(JSON.stringify(payload));
 }

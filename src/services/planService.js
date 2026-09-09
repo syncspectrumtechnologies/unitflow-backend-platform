@@ -24,7 +24,7 @@ async function ensureDefaultPlans() {
         advanced_exports: false,
         premium_messaging: false,
         plan_family: 'single',
-        enabled_modules: ['core_erp', 'inventory', 'orders', 'invoices', 'payments', 'purchases']
+        enabled_modules: ['core_erp', 'inventory', 'orders', 'invoices', 'payments', 'purchases', 'accounting', 'tally']
       }
     },
     {
@@ -48,7 +48,7 @@ async function ensureDefaultPlans() {
         advanced_exports: true,
         premium_messaging: true,
         plan_family: 'multi',
-        enabled_modules: ['core_erp', 'inventory', 'orders', 'invoices', 'payments', 'purchases', 'chat', 'broadcast', 'stats']
+        enabled_modules: ['core_erp', 'inventory', 'orders', 'invoices', 'payments', 'purchases', 'accounting', 'tally', 'chat', 'broadcast', 'stats']
       }
     }
   ];

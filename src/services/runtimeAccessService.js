@@ -131,6 +131,84 @@ function groupActiveSeats(activeSessions) {
   return [...seatMap.values()];
 }
 
+function summarizePlan(subscription) {
+  if (!subscription) return null;
+  const plan = subscription.plan || {};
+  const snapshot = subscription.plan_snapshot_json || {};
+  return {
+    code: plan.code || snapshot.code || null,
+    name: plan.name || snapshot.name || null,
+    plan_type: plan.plan_type || snapshot.plan_type || null,
+    billing_cycle: subscription.billing_cycle || null,
+    subscription_status: subscription.status || null,
+    seat_limit: subscription.seat_limit || null
+  };
+}
+
+function serializeSeat(seat) {
+  return {
+    runtime_user_id: seat.runtime_user_id || null,
+    runtime_user_email: seat.runtime_user_email || null,
+    runtime_user_name: seat.runtime_user_name || null,
+    issued_at: seat.issued_at,
+    last_seen_at: seat.last_seen_at,
+    session_count: seat.session_ids?.length || 0,
+    devices: (seat.devices || []).map((device) => ({
+      id: device.id,
+      device_name: device.device_name,
+      platform: device.platform,
+      last_seen_at: device.last_seen_at
+    }))
+  };
+}
+
+async function getTenantAccessSummary(tenant) {
+  const activeSessions = await getActiveRuntimeSessions(tenant.id);
+  const activeSeats = groupActiveSeats(activeSessions);
+  const latestSubscription = getLatestSubscription(tenant);
+  let resolvedSubscription = latestSubscription;
+  let runtimeEligible = false;
+  let blockedReason = null;
+
+  try {
+    resolvedSubscription = assertRuntimeEligible(tenant, { allowPrivilegedBypass: true });
+    runtimeEligible = true;
+  } catch (error) {
+    blockedReason = error.message || 'Runtime access is not available';
+  }
+
+  const plan = summarizePlan(resolvedSubscription);
+  const activeDevices = (tenant.devices || []).filter((device) => device.is_active && !device.revoked_at);
+  const planType = plan?.plan_type || null;
+  const seatLimit = plan?.seat_limit || latestSubscription?.seat_limit || null;
+
+  return {
+    tenant_id: tenant.id,
+    tenant_name: tenant.display_name,
+    runtime_access_ready: isRuntimeProvisionReady(tenant),
+    runtime_eligible: runtimeEligible,
+    blocked_reason: blockedReason,
+    lifecycle_status: tenant.lifecycle_status,
+    runtime_provision_status: tenant.runtime_provision_status,
+    plan,
+    policy: {
+      plan_type: planType,
+      seat_limit: seatLimit,
+      active_seat_count: activeSeats.length,
+      remaining_seats: Number.isFinite(Number(seatLimit)) ? Math.max(Number(seatLimit) - activeSeats.length, 0) : null,
+      single_user_device_lock: planType === 'SINGLE_USER',
+      max_active_devices: planType === 'SINGLE_USER' ? 1 : null
+    },
+    share: {
+      tenant_id: tenant.id,
+      login_identifier: tenant.id
+    },
+    active_seats: activeSeats.map(serializeSeat),
+    active_session_count: activeSessions.length,
+    active_device_count: activeDevices.length
+  };
+}
+
 async function revokeSeatSessions(tenantId, seat, reason) {
   if (!seat?.session_ids?.length) return;
   const now = new Date();
@@ -399,5 +477,6 @@ module.exports = {
   createRuntimeSession,
   validateRuntimeSession,
   revokeTenantRuntimeAccess,
-  listTenantSessions
+  listTenantSessions,
+  getTenantAccessSummary
 };

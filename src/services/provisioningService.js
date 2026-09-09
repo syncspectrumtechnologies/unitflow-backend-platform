@@ -8,6 +8,33 @@ const { createAudit } = require('./auditService');
 const { createNotification } = require('./notificationService');
 const { isPrivilegedRuntimeAccess } = require('./runtimeAccessService');
 
+const DEFAULT_ENABLED_MODULES = [
+  'dashboard',
+  'orders',
+  'inventory',
+  'production',
+  'purchases',
+  'clients',
+  'products',
+  'categories',
+  'invoices',
+  'payments',
+  'accounting',
+  'tally',
+  'chat',
+  'broadcast',
+  'messages',
+  'factories'
+];
+
+const DEFAULT_FEATURE_FLAGS = {
+  auto_deduct_inventory_on_dispatch: true,
+  keyboard_shortcuts: true,
+  simple_mode: true,
+  low_stock_suggestions: true,
+  order_shortage_warnings: true
+};
+
 let workerTimer = null;
 let workerRunning = false;
 
@@ -25,6 +52,31 @@ function configVersionHash(payload) {
 
 function getLatestSubscription(tenant) {
   return Array.isArray(tenant?.subscriptions) ? tenant.subscriptions[0] || null : null;
+}
+
+function normalizedEnabledModules(value) {
+  const source = Array.isArray(value) && value.length ? value : DEFAULT_ENABLED_MODULES;
+  return [...new Set(source.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean))];
+}
+
+function normalizedFeatureFlags(value = {}) {
+  const incoming = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const flags = { ...DEFAULT_FEATURE_FLAGS };
+  for (const key of Object.keys(DEFAULT_FEATURE_FLAGS)) {
+    if (typeof incoming[key] === 'boolean') flags[key] = incoming[key];
+  }
+  return flags;
+}
+
+function resolveRuntimePreferences(tenant, subscription) {
+  const planLimits = subscription?.plan?.feature_limits_json || subscription?.plan_snapshot_json?.feature_limits_json || {};
+  const enabledModules = normalizedEnabledModules(tenant.config?.enabled_modules_json || DEFAULT_ENABLED_MODULES);
+  const featureFlags = {
+    ...planLimits,
+    ...normalizedFeatureFlags(tenant.config?.feature_flags_json),
+    enabled_modules: enabledModules
+  };
+  return { enabledModules, featureFlags };
 }
 
 function buildPrivilegedSubscriptionSnapshot() {
@@ -51,6 +103,7 @@ function buildPrivilegedSubscriptionSnapshot() {
 }
 
 function buildProvisioningVersion(tenant, subscription) {
+  const preferences = resolveRuntimePreferences(tenant, subscription || {});
   return configVersionHash({
     tenant: {
       id: tenant.id,
@@ -73,7 +126,9 @@ function buildProvisioningVersion(tenant, subscription) {
       invoice_header: tenant.config?.invoice_header,
       invoice_footer: tenant.config?.invoice_footer,
       locale: tenant.config?.locale,
-      timezone: tenant.config?.timezone
+      timezone: tenant.config?.timezone,
+      enabled_modules: preferences.enabledModules,
+      feature_flags: preferences.featureFlags
     },
     locations: (tenant.locations || []).map((item) => ({
       name: item.name,
@@ -128,6 +183,7 @@ async function loadTenantForProvisioning(tenantId) {
 function buildProvisionPayload(tenant, subscription, configVersion) {
   const planCode = subscription.plan?.code || subscription.plan_snapshot_json?.code || null;
   const featureLimits = subscription.plan?.feature_limits_json || subscription.plan_snapshot_json?.feature_limits_json || {};
+  const preferences = resolveRuntimePreferences(tenant, subscription);
 
   return {
     tenant_id: tenant.id,
@@ -148,8 +204,8 @@ function buildProvisionPayload(tenant, subscription, configVersion) {
       locale: tenant.config?.locale,
       timezone: tenant.config?.timezone,
       config_version: configVersion,
-      enabled_modules: featureLimits.enabled_modules || ['core_erp'],
-      feature_flags: featureLimits
+      enabled_modules: preferences.enabledModules,
+      feature_flags: preferences.featureFlags
     },
     locations: (tenant.locations || []).map((item) => ({
       name: item.name,
@@ -182,7 +238,11 @@ function buildProvisionPayload(tenant, subscription, configVersion) {
       status: String(subscription.status || '').toLowerCase(),
       active_until: subscription.renews_at?.toISOString?.() || subscription.ends_at?.toISOString?.() || null,
       seat_limit: subscription.seat_limit,
-      feature_limits: featureLimits,
+      feature_limits: {
+        ...featureLimits,
+        enabled_modules: preferences.enabledModules,
+        feature_flags: preferences.featureFlags
+      },
       config_version: configVersion
     }
   };
@@ -228,8 +288,8 @@ async function runProvisioningJob(tenantId, { reason = 'worker', actorType = 'SY
     throw httpError(409, 'Tenant does not have an active subscription for provisioning');
   }
 
-  if (!tenant.owner?.email_verified_at || !tenant.owner?.phone_verified_at) {
-    throw httpError(409, 'Email and phone verification are required before provisioning');
+  if (!tenant.owner?.email_verified_at) {
+    throw httpError(409, 'Email verification is required before provisioning');
   }
 
   if (tenant.runtime_provision_status === 'IN_PROGRESS' && !force) {

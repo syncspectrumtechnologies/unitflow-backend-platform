@@ -1,15 +1,25 @@
 const express = require('express');
 const accountAuthMiddleware = require('../middlewares/accountAuthMiddleware');
 const controller = require('../controllers/tenantController');
+const runtimeAdminController = require('../controllers/runtimeAdminController');
+const { validateTenantPayload, validateTenantConfig } = require('../middlewares/platformValidationMiddleware');
 
 const router = express.Router();
 router.use(accountAuthMiddleware);
-router.post('/onboarding/draft', controller.saveOnboardingDraft);
-router.post('/onboard', controller.onboardPaidTenant);
+router.post('/onboarding/draft', validateTenantPayload, controller.saveOnboardingDraft);
+router.post('/onboard', validateTenantPayload, controller.onboardPaidTenant);
 router.get('/', controller.listMine);
 router.get('/:tenantId/dashboard', controller.getDashboard);
 router.get('/:tenantId/referrals', controller.getReferralPage);
+router.get('/:tenantId/audits', controller.getAuditHistory);
+router.get('/:tenantId/runtime-users', runtimeAdminController.listUsers);
+router.post('/:tenantId/runtime-users', runtimeAdminController.createUser);
+router.get('/:tenantId/runtime-roles', runtimeAdminController.listRoles);
+router.post('/:tenantId/runtime-roles', runtimeAdminController.createRole);
+router.post('/:tenantId/runtime-users/:userId/roles', runtimeAdminController.assignUserRole);
+router.get('/:tenantId/runtime-permissions', runtimeAdminController.listPermissions);
+router.post('/:tenantId/runtime-roles/:roleId/permissions', runtimeAdminController.attachRolePermissions);
 router.get('/:tenantId', controller.getOne);
-router.put('/:tenantId/config', controller.updateConfig);
+router.put('/:tenantId/config', validateTenantConfig, controller.updateConfig);
 router.post('/:tenantId/provisioning/retry', controller.retryProvisioning);
 module.exports = router;

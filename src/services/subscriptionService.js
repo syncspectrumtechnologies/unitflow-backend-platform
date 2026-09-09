@@ -24,15 +24,16 @@ async function createCheckoutPayment(db, {
   currency = 'INR',
   metadata = null,
   couponCode = null,
-  gatewayMode = null
+  gatewayMode = null,
+  baseAmountMinor = null
 }) {
-  const baseAmountMinor = billingCycle === 'YEARLY' ? plan.yearly_price_minor : plan.monthly_price_minor;
+  const resolvedBaseAmountMinor = Number(baseAmountMinor ?? (billingCycle === 'YEARLY' ? plan.yearly_price_minor : plan.monthly_price_minor));
   const { coupon, pricing } = await validateCouponForCheckout({
     accountId,
     tenantId,
     plan,
     couponCode,
-    baseAmountMinor,
+    baseAmountMinor: resolvedBaseAmountMinor,
     currency
   });
 
@@ -46,7 +47,7 @@ async function createCheckoutPayment(db, {
       amount_minor: pricing.final_amount_minor,
       currency,
       status: 'PENDING',
-      gateway: 'manual-test-gateway',
+      gateway: 'razorpay',
       metadata_json: {
         plan_code: plan.code,
         plan_type: plan.plan_type,
@@ -72,10 +73,16 @@ async function activatePaidSubscription({ tenant, plan, billingCycle, payment })
 
   const normalizedBillingCycle = String(billingCycle).toUpperCase();
   const now = new Date();
-  const renewsAt = computeRenewalDate(now, normalizedBillingCycle);
   const runtimeWasReady = tenant.runtime_provision_status === 'READY' && Boolean(tenant.runtime_company_id);
 
   const subscription = await prisma.$transaction(async (tx) => {
+    const current = await tx.tenantSubscription.findFirst({
+      where: { tenant_id: tenant.id, status: { in: ['ACTIVE', 'GRACE'] } },
+      orderBy: [{ ends_at: 'desc' }, { renews_at: 'desc' }]
+    });
+    const baseDate = current?.ends_at && current.ends_at > now ? current.ends_at : now;
+    const renewsAt = computeRenewalDate(baseDate, normalizedBillingCycle);
+
     await tx.tenantSubscription.updateMany({
       where: { tenant_id: tenant.id, status: { in: ['ACTIVE', 'GRACE'] } },
       data: { status: 'CANCELLED', cancelled_at: now }
@@ -94,6 +101,8 @@ async function activatePaidSubscription({ tenant, plan, billingCycle, payment })
           plan_type: plan.plan_type,
           monthly_price_minor: plan.monthly_price_minor,
           yearly_price_minor: plan.yearly_price_minor,
+          checkout_currency: payment?.currency || null,
+          checkout_amount_minor: payment?.amount_minor ?? null,
           feature_limits_json: plan.feature_limits_json
         },
         started_at: now,

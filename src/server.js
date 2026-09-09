@@ -43,8 +43,9 @@ if (env.validateEnvOnBoot) validate();
     await ensureDefaultPlans();
     await bootstrapSuperAdminIfConfigured();
     startProvisioningWorker();
-    const server = app.listen(env.port, '0.0.0.0', () => {
-      logger.info('UnitFlow platform API started', { port: env.port, build_fingerprint: env.buildFingerprint });
+    const host = process.env.HOST || '0.0.0.0';
+    const server = app.listen(env.port, host, () => {
+      logger.info('UnitFlow platform API started', { host, port: env.port, build_fingerprint: env.buildFingerprint });
     });
 
     const shutdown = async (signal) => {

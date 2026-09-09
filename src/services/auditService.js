@@ -1,4 +1,5 @@
 const prisma = require('../config/db');
+const { redact } = require('../utils/redact');
 
 async function createAudit({ actorType, actorId = null, tenantId = null, entityType, entityId = null, action, metadata = null }) {
   return prisma.opsAuditLog.create({
@@ -9,7 +10,7 @@ async function createAudit({ actorType, actorId = null, tenantId = null, entityT
       entity_type: entityType,
       entity_id: entityId,
       action,
-      metadata_json: metadata || undefined
+      metadata_json: metadata ? redact(metadata) : undefined
     }
   });
 }
