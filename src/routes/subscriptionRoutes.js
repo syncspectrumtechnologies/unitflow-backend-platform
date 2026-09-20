@@ -7,6 +7,7 @@ router.get('/plans', controller.listPlans);
 router.post('/coupons/validate', accountAuthMiddleware, controller.validateCoupon);
 router.post('/checkout-intent', accountAuthMiddleware, controller.createCheckoutIntent);
 router.post('/checkout/verify', accountAuthMiddleware, controller.verifyRazorpayCheckout);
+router.post('/payments/:paymentId/checkout', accountAuthMiddleware, controller.resumeCheckoutPayment);
 router.post('/webhooks/payment', controller.paymentWebhook);
 router.post('/webhooks/razorpay', controller.razorpayWebhook);
 router.get('/billing-summary', accountAuthMiddleware, controller.getBillingSummary);

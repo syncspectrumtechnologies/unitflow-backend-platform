@@ -71,6 +71,7 @@ async function finalizeSuccessfulPayment({ tenant, plan, billingCycle, payment, 
 async function completeSuccessfulCheckout({ tenant, plan, billingCycle, payment, metadata = {} }) {
   const now = new Date();
   const referencePrefix = metadata.payment_reference_prefix || 'AUTO';
+  const receiptRef = payment.invoice_ref || `UF-${String(payment.id).replace(/[^a-zA-Z0-9]/g, '').slice(-10).toUpperCase()}`;
   const succeededPayment = await prisma.payment.update({
     where: { id: payment.id },
     data: {
@@ -78,6 +79,7 @@ async function completeSuccessfulCheckout({ tenant, plan, billingCycle, payment,
       paid_at: now,
       gateway_status: 'SUCCEEDED',
       gateway_payment_ref: payment.gateway_payment_ref || `${referencePrefix}-${String(payment.id).replace(/[^a-zA-Z0-9]/g, '').slice(0, 28)}`,
+      invoice_ref: receiptRef,
       metadata_json: {
         ...(payment.metadata_json || {}),
         ...(metadata.payment_metadata || {})

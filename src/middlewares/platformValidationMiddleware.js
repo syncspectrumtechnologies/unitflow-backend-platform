@@ -273,6 +273,19 @@ function validateRuntimeLogin(req, res, next) {
   }
 }
 
+function validateDeleteAccount(req, res, next) {
+  try {
+    const data = body(req);
+    password(data, 'password', 1);
+    requiredText(data, 'confirmation', 20);
+    if (data.confirmation !== 'DELETE') throw httpError(400, 'Type DELETE to confirm account deletion');
+    bool(data, 'download_requested');
+    next();
+  } catch (error) {
+    next(error);
+  }
+}
+
 function validateTenantPayload(req, res, next) {
   try {
     const data = body(req);
@@ -323,6 +336,7 @@ module.exports = {
   validateVerificationRequest,
   validateVerificationSubmit,
   validateRuntimeLogin,
+  validateDeleteAccount,
   validateTenantPayload,
   validateTenantConfig
 };

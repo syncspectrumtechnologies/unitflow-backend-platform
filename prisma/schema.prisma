@@ -345,11 +345,35 @@ model Payment {
   coupon       Coupon?             @relation(fields: [coupon_id], references: [id])
   coupon_redemptions CouponRedemption[]
   referral_rewards ReferralReward[]
+  webhook_events PaymentWebhookEvent[]
 
   @@index([tenant_id, status])
   @@index([gateway_order_ref])
   @@index([gateway_payment_ref])
   @@index([coupon_id])
+}
+
+model PaymentWebhookEvent {
+  id                  String   @id @default(cuid())
+  provider            String
+  event_id            String?
+  event_name          String?
+  signature_sha256    String
+  payment_id          String?
+  gateway_order_ref   String?
+  gateway_payment_ref String?
+  status              String   @default("RECEIVED")
+  summary_json        Json?
+  error_message       String?
+  received_at         DateTime @default(now())
+  processed_at        DateTime?
+
+  payment Payment? @relation(fields: [payment_id], references: [id], onDelete: SetNull)
+
+  @@unique([provider, signature_sha256])
+  @@index([provider, event_id])
+  @@index([provider, event_name, received_at])
+  @@index([payment_id])
 }
 
 model Coupon {

@@ -28,6 +28,15 @@ function razorpayClient() {
   });
 }
 
+function publicPolicyUrls() {
+  const base = String(env.publicAppBaseUrl || '').replace(/\/+$/, '');
+  return {
+    terms_url: base ? `${base}/terms-and-conditions` : null,
+    refund_policy_url: base ? `${base}/refund-policy` : null,
+    privacy_policy_url: base ? `${base}/privacy-policy` : null
+  };
+}
+
 function safeEqualHex(left, right) {
   const a = Buffer.from(String(left || ''), 'hex');
   const b = Buffer.from(String(right || ''), 'hex');
@@ -57,7 +66,10 @@ async function createRazorpayOrder({ payment, tenant, account }) {
     tenant_id: payment.tenant_id,
     account_id: account.id,
     plan_code: String(payment.metadata_json?.plan_code || ''),
-    billing_cycle: String(payment.metadata_json?.billing_cycle || '')
+    billing_cycle: String(payment.metadata_json?.billing_cycle || ''),
+    billing_model: 'PREPAID_SAAS_RENEWAL',
+    owner: env.businessOwnerName,
+    operator: env.businessOperatorName
   };
 
   const response = await razorpayClient().post('/orders', {
@@ -114,12 +126,19 @@ async function preparePaymentCheckout({ payment, tenant, account }) {
       currency: order.currency,
       name: env.appName || 'UnitFlow',
       description: `${payment.metadata_json?.plan_code || 'UnitFlow'} ${payment.metadata_json?.billing_cycle || ''}`.trim(),
+      business: {
+        owner: env.businessOwnerName,
+        operator: env.businessOperatorName
+      },
       prefill: {
         name: account.name || '',
         email: account.email || '',
         contact: account.phone || ''
       },
-      notes: order.notes || {},
+      notes: {
+        ...(order.notes || {}),
+        ...publicPolicyUrls()
+      },
       theme: {
         color: tenant?.config?.theme_color || '#1f6f5b'
       }

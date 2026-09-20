@@ -11,6 +11,7 @@
     "postinstall": "node scripts/prisma-generate.js",
     "prisma:generate": "node scripts/prisma-generate.js",
     "prisma:migrate": "node scripts/prisma-migrate-deploy.js",
+    "test:razorpay-security": "node scripts/test-razorpay-security.js",
     "platform:create-ops-admin": "node scripts/create-ops-admin.js",
     "platform:create-super-admin": "node scripts/create-super-admin.js",
     "platform:maintenance": "node scripts/subscription-maintenance.js"
@@ -25,7 +26,7 @@
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
-    "nodemailer": "^9.0.3",
+    "nodemailer": "^10.0.9",
     "prisma": "^6.11.1",
     "rate-limit-redis": "^4.3.1",
     "redis": "^4.7.1"
@@ -35,7 +36,8 @@
   },
   "overrides": {
     "effect": "^3.20.0",
-    "deepmerge-ts": "^8.0.1"
+    "deepmerge-ts": "^8.0.1",
+    "qs": "^6.16.0"
   },
   "author": "Sync Spectrum Technologies",
   "license": "ISC"

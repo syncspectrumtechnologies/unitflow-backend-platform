@@ -52,6 +52,8 @@ async function createCheckoutPayment(db, {
         plan_code: plan.code,
         plan_type: plan.plan_type,
         billing_cycle: billingCycle,
+        billing_model: 'PREPAID_SAAS_RENEWAL',
+        auto_debit_enabled: false,
         account_id: accountId,
         coupon_code: coupon?.code || null,
         ...(metadata || {})

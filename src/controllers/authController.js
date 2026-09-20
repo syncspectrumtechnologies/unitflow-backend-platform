@@ -1,4 +1,5 @@
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 const prisma = require('../config/db');
 const { env } = require('../config/env');
 const httpError = require('../utils/httpError');
@@ -79,6 +80,198 @@ function serializeRuntimeDevice(device) {
     first_seen_at: device.first_seen_at,
     last_seen_at: device.last_seen_at,
     revoked_at: device.revoked_at
+  };
+}
+
+function paymentSelect() {
+  return {
+    id: true,
+    tenant_id: true,
+    subscription_id: true,
+    gateway: true,
+    gateway_mode: true,
+    gateway_order_ref: true,
+    gateway_payment_ref: true,
+    original_amount_minor: true,
+    discount_minor: true,
+    amount_minor: true,
+    currency: true,
+    status: true,
+    invoice_ref: true,
+    receipt_url: true,
+    metadata_json: true,
+    paid_at: true,
+    created_at: true,
+    updated_at: true,
+    webhook_events: {
+      select: {
+        id: true,
+        provider: true,
+        event_id: true,
+        event_name: true,
+        status: true,
+        summary_json: true,
+        received_at: true,
+        processed_at: true
+      }
+    }
+  };
+}
+
+async function buildAccountDataExport(accountId) {
+  const account = await prisma.account.findUnique({
+    where: { id: accountId },
+    select: {
+      id: true,
+      email: true,
+      phone: true,
+      name: true,
+      status: true,
+      email_verified_at: true,
+      phone_verified_at: true,
+      referral_code: true,
+      referral_credit_balance_minor: true,
+      lifetime_referral_earnings_minor: true,
+      referred_at: true,
+      last_login_at: true,
+      created_at: true,
+      updated_at: true
+    }
+  });
+  if (!account) throw httpError(404, 'Account not found');
+
+  const tenants = await prisma.tenant.findMany({
+    where: { owner_account_id: accountId },
+    include: {
+      config: true,
+      locations: true,
+      sales_companies: true,
+      subscriptions: {
+        include: { plan: true },
+        orderBy: { created_at: 'desc' }
+      },
+      payments: {
+        select: paymentSelect(),
+        orderBy: { created_at: 'desc' }
+      },
+      devices: {
+        select: {
+          id: true,
+          tenant_id: true,
+          device_name: true,
+          platform: true,
+          os_version: true,
+          app_version: true,
+          is_active: true,
+          first_seen_at: true,
+          last_seen_at: true,
+          revoked_at: true,
+          created_at: true,
+          updated_at: true
+        }
+      },
+      runtime_sessions: {
+        select: {
+          id: true,
+          tenant_id: true,
+          account_id: true,
+          device_id: true,
+          scope: true,
+          issued_at: true,
+          expires_at: true,
+          revoked_at: true,
+          revoke_reason: true,
+          last_seen_at: true,
+          created_at: true
+        },
+        orderBy: { created_at: 'desc' },
+        take: 250
+      },
+      notifications: {
+        orderBy: { created_at: 'desc' },
+        take: 250
+      },
+      coupon_redemptions: {
+        orderBy: { created_at: 'desc' }
+      },
+      referral_rewards: {
+        orderBy: { created_at: 'desc' }
+      }
+    },
+    orderBy: { created_at: 'desc' }
+  });
+
+  const tenantIds = tenants.map((tenant) => tenant.id);
+  const [
+    sessions,
+    verifications,
+    accountNotifications,
+    couponRedemptions,
+    rewardsGiven,
+    rewardsReceived,
+    creditLedger,
+    audits
+  ] = await Promise.all([
+    prisma.platformSession.findMany({
+      where: { account_id: accountId },
+      select: { id: true, ip: true, user_agent: true, last_seen_at: true, expires_at: true, revoked_at: true, created_at: true },
+      orderBy: { created_at: 'desc' },
+      take: 250
+    }),
+    prisma.accountVerification.findMany({
+      where: { account_id: accountId },
+      select: { id: true, channel: true, purpose: true, target: true, expires_at: true, consumed_at: true, created_at: true },
+      orderBy: { created_at: 'desc' },
+      take: 100
+    }),
+    prisma.platformNotification.findMany({
+      where: { account_id: accountId },
+      orderBy: { created_at: 'desc' },
+      take: 250
+    }),
+    prisma.couponRedemption.findMany({
+      where: { account_id: accountId },
+      orderBy: { created_at: 'desc' }
+    }),
+    prisma.referralReward.findMany({
+      where: { referrer_account_id: accountId },
+      orderBy: { created_at: 'desc' }
+    }),
+    prisma.referralReward.findMany({
+      where: { referred_account_id: accountId },
+      orderBy: { created_at: 'desc' }
+    }),
+    prisma.accountCreditLedger.findMany({
+      where: { account_id: accountId },
+      orderBy: { created_at: 'desc' }
+    }),
+    prisma.opsAuditLog.findMany({
+      where: {
+        OR: [
+          { actor_id: accountId },
+          ...(tenantIds.length ? [{ tenant_id: { in: tenantIds } }] : [])
+        ]
+      },
+      orderBy: { created_at: 'desc' },
+      take: 1000
+    })
+  ]);
+
+  return {
+    ok: true,
+    exported_at: new Date().toISOString(),
+    export_type: 'platform_account_data',
+    note: 'Password hashes, session tokens, webhook signatures, and device fingerprints are intentionally excluded.',
+    account,
+    tenants,
+    platform_sessions: sessions,
+    verifications,
+    account_notifications: accountNotifications,
+    coupon_redemptions: couponRedemptions,
+    referral_rewards_given: rewardsGiven,
+    referral_rewards_received: rewardsReceived,
+    credit_ledger: creditLedger,
+    audit_logs: audits
   };
 }
 
@@ -435,6 +628,101 @@ exports.me = async (req, res, next) => {
       tenants,
       referral
     });
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.exportAccountData = async (req, res, next) => {
+  try {
+    const payload = await buildAccountDataExport(req.account.id);
+    await createAudit({
+      actorType: 'ACCOUNT',
+      actorId: req.account.id,
+      entityType: 'account',
+      entityId: req.account.id,
+      action: 'account.data_exported',
+      metadata: { tenant_count: payload.tenants.length }
+    });
+    res.setHeader('Content-Disposition', `attachment; filename="unitflow-account-data-${req.account.id}.json"`);
+    return res.json(payload);
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.deleteAccount = async (req, res, next) => {
+  try {
+    if (req.account.is_super_admin) throw httpError(403, 'Super admin accounts cannot be deleted from profile settings');
+
+    const { password, download_requested = false } = req.body || {};
+    const ok = await bcrypt.compare(String(password || ''), req.account.password_hash);
+    if (!ok) throw httpError(401, 'Invalid password');
+
+    const now = new Date();
+    const replacementHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
+    const tenants = await prisma.tenant.findMany({
+      where: { owner_account_id: req.account.id },
+      select: { id: true }
+    });
+    const tenantIds = tenants.map((tenant) => tenant.id);
+
+    await prisma.$transaction(async (tx) => {
+      await tx.platformSession.updateMany({
+        where: { account_id: req.account.id, revoked_at: null },
+        data: { revoked_at: now }
+      });
+      await tx.runtimeSession.updateMany({
+        where: { account_id: req.account.id, revoked_at: null },
+        data: { revoked_at: now, revoke_reason: 'ACCOUNT_DELETED' }
+      });
+      if (tenantIds.length) {
+        await tx.device.updateMany({
+          where: { tenant_id: { in: tenantIds }, account_id: req.account.id },
+          data: { is_active: false, revoked_at: now }
+        });
+        await tx.tenantSubscription.updateMany({
+          where: { tenant_id: { in: tenantIds }, status: { in: ['TRIAL', 'ACTIVE', 'GRACE'] } },
+          data: { status: 'CANCELLED', cancelled_at: now, ends_at: now, grace_until: null }
+        });
+        await tx.payment.updateMany({
+          where: { tenant_id: { in: tenantIds }, status: 'PENDING' },
+          data: { status: 'FAILED', gateway_status: 'cancelled_account_deleted' }
+        });
+        await tx.tenant.updateMany({
+          where: { id: { in: tenantIds } },
+          data: { lifecycle_status: 'CANCELLED' }
+        });
+      }
+      await tx.account.update({
+        where: { id: req.account.id },
+        data: {
+          email: `deleted+${req.account.id}@unitflow.local`,
+          phone: null,
+          name: 'Deleted account',
+          password_hash: replacementHash,
+          status: 'DISABLED',
+          runtime_access_exempt: false,
+          email_verified_at: null,
+          phone_verified_at: null
+        }
+      });
+      await tx.opsAuditLog.create({
+        data: {
+          actor_type: 'ACCOUNT',
+          actor_id: req.account.id,
+          entity_type: 'account',
+          entity_id: req.account.id,
+          action: 'account.deleted',
+          metadata_json: {
+            tenant_count: tenantIds.length,
+            download_requested: Boolean(download_requested)
+          }
+        }
+      });
+    });
+
+    return res.json({ ok: true, deleted: true });
   } catch (error) {
     next(error);
   }

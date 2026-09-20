@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const prisma = require('../config/db');
 const httpError = require('../utils/httpError');
 const { env } = require('../config/env');
@@ -139,6 +140,65 @@ function validateGatewayMatch(payment, gatewayEntity = {}) {
   if (String(gatewayEntity.currency || '').toUpperCase() !== String(payment.currency || '').toUpperCase()) {
     throw httpError(400, 'Payment currency mismatch');
   }
+}
+
+function webhookFingerprint(rawBody, signature) {
+  const hash = crypto.createHash('sha256');
+  hash.update(Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(String(rawBody || '')));
+  hash.update(':');
+  hash.update(String(signature || ''));
+  return hash.digest('hex');
+}
+
+function webhookSummary(event = {}) {
+  const payment = event.payload?.payment?.entity || {};
+  const order = event.payload?.order?.entity || {};
+  return {
+    event: String(event.event || '').slice(0, 80),
+    razorpay_event_id: String(event.id || '').slice(0, 120) || null,
+    payment_id: payment.id || null,
+    order_id: payment.order_id || order.id || null,
+    payment_status: payment.status || null,
+    order_status: order.status || null,
+    amount: payment.amount || order.amount || null,
+    currency: payment.currency || order.currency || null
+  };
+}
+
+async function reserveWebhookEvent({ event, rawBody, signature }) {
+  const signature_sha256 = webhookFingerprint(rawBody, signature);
+  const summary = webhookSummary(event);
+  try {
+    const row = await prisma.paymentWebhookEvent.create({
+      data: {
+        provider: 'RAZORPAY',
+        event_id: summary.razorpay_event_id,
+        event_name: summary.event,
+        signature_sha256,
+        gateway_order_ref: summary.order_id,
+        gateway_payment_ref: summary.payment_id,
+        summary_json: summary
+      }
+    });
+    return { row, duplicateProcessed: false };
+  } catch (error) {
+    if (error?.code !== 'P2002') throw error;
+    const row = await prisma.paymentWebhookEvent.findUnique({
+      where: { provider_signature_sha256: { provider: 'RAZORPAY', signature_sha256 } }
+    });
+    return { row, duplicateProcessed: row?.status === 'PROCESSED' };
+  }
+}
+
+async function markWebhookEvent(row, data) {
+  if (!row?.id) return;
+  await prisma.paymentWebhookEvent.update({
+    where: { id: row.id },
+    data: {
+      ...data,
+      error_message: data.error_message ? String(data.error_message).slice(0, 500) : data.error_message
+    }
+  }).catch(() => {});
 }
 
 async function settleVerifiedPayment({ payment, gatewayEntity, source }) {
@@ -397,18 +457,64 @@ exports.verifyRazorpayCheckout = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
+exports.resumeCheckoutPayment = async (req, res, next) => {
+  try {
+    const paymentId = String(req.params.paymentId || '').trim();
+    if (!PAYMENT_ID_PATTERN.test(paymentId)) throw httpError(400, 'Valid payment id is required');
+
+    const payment = await selectAccountPayment(paymentId, req.account.id);
+    if (!payment) throw httpError(404, 'Payment not found');
+    if (payment.status !== 'PENDING') throw httpError(409, `Payment cannot be resumed from ${payment.status}`);
+
+    const planCode = paymentPlan(payment);
+    const billingCycle = String(paymentBillingCycle(payment) || '').toUpperCase();
+    if (!planCode || !['MONTHLY', 'YEARLY'].includes(billingCycle)) throw httpError(409, 'Payment is missing plan metadata');
+    const plan = await getPlanByCode(String(planCode).toUpperCase());
+    if (!plan) throw httpError(404, 'Plan not found');
+
+    const { payment: preparedPayment, checkout } = await prepareCheckoutResponse({
+      payment,
+      tenant: payment.tenant,
+      account: req.account,
+      gatewayMode: payment.gateway_mode || 'RAZORPAY'
+    });
+
+    res.json({
+      ok: true,
+      payment_id: preparedPayment.id,
+      amount_minor: preparedPayment.amount_minor,
+      original_amount_minor: preparedPayment.original_amount_minor,
+      discount_minor: preparedPayment.discount_minor,
+      currency: preparedPayment.currency,
+      plan_code: plan.code,
+      billing_cycle: billingCycle,
+      gateway: preparedPayment.gateway,
+      gateway_mode: preparedPayment.gateway_mode,
+      checkout
+    });
+  } catch (error) { next(error); }
+};
+
 exports.razorpayWebhook = async (req, res, next) => {
+  let webhookRow = null;
   try {
     const signature = req.headers['x-razorpay-signature'];
     if (!verifyRazorpayWebhookSignature(req.rawBody, signature)) throw httpError(401, 'Invalid webhook signature');
 
     const event = req.body || {};
+    const reserved = await reserveWebhookEvent({ event, rawBody: req.rawBody, signature });
+    webhookRow = reserved.row;
+    if (reserved.duplicateProcessed) return res.json({ ok: true, duplicate: true });
+
     const eventName = String(event.event || '').toLowerCase();
     const paymentEntity = event.payload?.payment?.entity || null;
     const orderEntity = event.payload?.order?.entity || null;
     const gatewayPaymentId = paymentEntity?.id || null;
     const gatewayOrderId = paymentEntity?.order_id || orderEntity?.id || null;
-    if (!gatewayOrderId && !gatewayPaymentId) return res.json({ ok: true, ignored: true });
+    if (!gatewayOrderId && !gatewayPaymentId) {
+      await markWebhookEvent(webhookRow, { status: 'IGNORED', processed_at: new Date() });
+      return res.json({ ok: true, ignored: true });
+    }
 
     const or = [];
     if (gatewayOrderId) or.push({ gateway_order_ref: gatewayOrderId });
@@ -421,7 +527,11 @@ exports.razorpayWebhook = async (req, res, next) => {
         coupon: { select: { id: true, code: true, name: true, discount_type: true } }
       }
     });
-    if (!payment) return res.json({ ok: true, ignored: true });
+    if (!payment) {
+      await markWebhookEvent(webhookRow, { status: 'IGNORED', processed_at: new Date() });
+      return res.json({ ok: true, ignored: true });
+    }
+    await markWebhookEvent(webhookRow, { payment_id: payment.id });
 
     if (eventName === 'payment.failed') {
       const updated = await prisma.payment.update({
@@ -445,6 +555,7 @@ exports.razorpayWebhook = async (req, res, next) => {
         action: 'payment.failed',
         metadata: { event: eventName, status: updated.status }
       });
+      await markWebhookEvent(webhookRow, { status: 'PROCESSED', processed_at: new Date() });
       return res.json({ ok: true });
     }
 
@@ -462,6 +573,7 @@ exports.razorpayWebhook = async (req, res, next) => {
           }
         }
       });
+      await markWebhookEvent(webhookRow, { status: 'PROCESSED', processed_at: new Date() });
       return res.json({ ok: true, pending: true });
     }
 
@@ -477,8 +589,12 @@ exports.razorpayWebhook = async (req, res, next) => {
       source: 'razorpay_webhook'
     });
 
+    await markWebhookEvent(webhookRow, { status: 'PROCESSED', processed_at: new Date() });
     res.json({ ok: true, provisioning: 'queued', subscription_id: subscription?.id || null });
-  } catch (error) { next(error); }
+  } catch (error) {
+    await markWebhookEvent(webhookRow, { status: 'FAILED', error_message: error?.message || 'Webhook failed' });
+    next(error);
+  }
 };
 
 exports.validateCoupon = async (req, res, next) => {

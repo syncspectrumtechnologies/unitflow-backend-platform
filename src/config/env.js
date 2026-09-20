@@ -42,6 +42,8 @@ const env = {
   isProduction: nodeEnv === 'production',
   serviceName: process.env.SERVICE_NAME || 'unitflow-platform-api',
   appName: process.env.APP_NAME || 'UnitFlow Platform',
+  businessOwnerName: process.env.BUSINESS_OWNER_NAME || 'SYNC SPECTRUM TECHNOLOGIES',
+  businessOperatorName: process.env.BUSINESS_OPERATOR_NAME || 'Edixity',
   port: parseIntEnv(process.env.PORT, 4100),
   corsAllowedOrigins: parseList(process.env.CORS_ALLOWED_ORIGINS),
   corsAllowNoOrigin: parseBool(process.env.CORS_ALLOW_NO_ORIGIN, true),
