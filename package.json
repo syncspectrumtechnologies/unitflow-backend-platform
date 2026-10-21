@@ -12,6 +12,9 @@
     "prisma:generate": "node scripts/prisma-generate.js",
     "prisma:migrate": "node scripts/prisma-migrate-deploy.js",
     "test:razorpay-security": "node scripts/test-razorpay-security.js",
+    "test:production-contracts": "node scripts/test-production-contracts.js",
+    "test:load-smoke": "node scripts/load-smoke.js",
+    "test": "npm run test:razorpay-security && npm run test:production-contracts",
     "platform:create-ops-admin": "node scripts/create-ops-admin.js",
     "platform:create-super-admin": "node scripts/create-super-admin.js",
     "platform:maintenance": "node scripts/subscription-maintenance.js"
